@@ -115,6 +115,8 @@ public:
               bool print_zu,
               bool print_xs_a,
               bool print_nh) :
+		soloParams_(NULL),
+		soloWl_(NULL),
 		geneModel_(NULL),
 		gmFeature_(GENE_FEATURE_EXONIC),
 		gmStrand_(GENE_STRAND_UNSTRANDED),
@@ -348,6 +350,11 @@ public:
 	 * growing it would maximise rebase conflicts against upstream.  The model
 	 * is immutable once loaded, so sharing it across threads needs no locking.
 	 */
+	void setSolo(const SoloParams* p, const SoloWhitelist* wl) {
+		soloParams_ = p;
+		soloWl_ = wl;
+	}
+
 	void setGeneModel(const GeneModel* gm, GeneFeature feat, GeneStrand strand) {
 		geneModel_ = gm;
 		gmFeature_ = feat;
@@ -356,6 +363,8 @@ public:
 
 protected:
 
+	const SoloParams*    soloParams_;  // barcode geometry for CB:Z/UB:Z, or NULL
+	const SoloWhitelist* soloWl_;      // for printing corrected barcodes
 	const GeneModel* geneModel_;  // gene model for GX:Z/GN:Z, or NULL
 	GeneFeature      gmFeature_;  // Gene (exonic) vs GeneFull (gene body)
 	GeneStrand       gmStrand_;   // library strandedness
@@ -999,6 +1008,30 @@ const
             o.append(buf);
         }
     }
+    // CB:Z / UB:Z -- corrected cell barcode and UMI, plus optional raw forms.
+    if(soloParams_ != NULL && soloParams_->enabled() && rd.solo.hasBarcode()) {
+        char sbuf[40];
+        WRITE_SEP();
+        o.append("CB:Z:");
+        if(rd.solo.corrected() && rd.solo.cbIdx != SoloRead::kNoIdx) {
+            uint32_t code = (soloWl_ != NULL && soloWl_->loaded())
+                            ? soloWl_->codeAt(rd.solo.cbIdx) : rd.solo.cbPacked;
+            soloUnpack(code, rd.solo.cbLen, sbuf);
+            o.append(sbuf);
+        } else {
+            o.append("-");
+        }
+        WRITE_SEP();
+        soloUnpack(rd.solo.umiPacked, rd.solo.umiLen, sbuf);
+        o.append("UB:Z:");
+        o.append(sbuf);
+        if(soloParams_->emitRaw) {
+            WRITE_SEP();
+            soloUnpack(rd.solo.cbPacked, rd.solo.cbLen, sbuf);
+            o.append("CR:Z:");
+            o.append(sbuf);
+        }
+    }
     // GX:Z / GN:Z -- gene assignment, when a gene model was supplied.
     // Reference blocks come from the CIGAR rather than the edit list so they
     // describe exactly the record being written here.
@@ -1140,6 +1173,26 @@ void SamConfig<index_t>::printEmptyOptFlags(
 const
 {
     char buf[1024];
+    // CB:Z / UB:Z on unaligned reads too.  STARsolo reports barcode statistics
+    // over all reads, not just aligned ones, so dropping them here would make
+    // the valid-barcode rate incomparable.
+    if(soloParams_ != NULL && soloParams_->enabled() && rd.solo.hasBarcode()) {
+        char sbuf[40];
+        WRITE_SEP();
+        o.append("CB:Z:");
+        if(rd.solo.corrected() && rd.solo.cbIdx != SoloRead::kNoIdx) {
+            uint32_t code = (soloWl_ != NULL && soloWl_->loaded())
+                            ? soloWl_->codeAt(rd.solo.cbIdx) : rd.solo.cbPacked;
+            soloUnpack(code, rd.solo.cbLen, sbuf);
+            o.append(sbuf);
+        } else {
+            o.append("-");
+        }
+        WRITE_SEP();
+        soloUnpack(rd.solo.umiPacked, rd.solo.umiLen, sbuf);
+        o.append("UB:Z:");
+        o.append(sbuf);
+    }
     if(print_yn_) {
         // YN:i: Minimum valid score for this mate
         TAlScore mn = sc.scoreMin.f<TAlScore>(rd.length());

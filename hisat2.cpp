@@ -256,6 +256,8 @@ static string knownSpliceSiteInfile;  //
 static string geneAnnotationFile;     // .ht2gm gene model for GX:Z/GN:Z
 static string geneFeatureStr;         // "Gene" (exonic) or "GeneFull" (body)
 static string geneStrandStr;          // "Unstranded", "Forward", "Reverse"
+static SoloParams soloParams;         // cell barcode / UMI geometry
+static string soloWhitelistFile;      // 10x barcode whitelist
 static string novelSpliceSiteInfile;  //
 static string novelSpliceSiteOutfile; //
 static bool secondary;
@@ -504,6 +506,8 @@ static void resetOptions() {
     geneAnnotationFile = "";
     geneFeatureStr = "Gene";
     geneStrandStr = "Unstranded";
+    soloParams = SoloParams();
+    soloWhitelistFile = "";
     novelSpliceSiteInfile = "";
     novelSpliceSiteOutfile = "";
     secondary = false;       // allow secondary alignments
@@ -740,6 +744,15 @@ static struct option long_options[] = {
     {(char*)"gene-annotation",              required_argument, 0,        ARG_GENE_ANNOTATION},
     {(char*)"gene-feature",                 required_argument, 0,        ARG_GENE_FEATURE},
     {(char*)"gene-strand",                  required_argument, 0,        ARG_GENE_STRAND},
+    {(char*)"solo-cb-in-readname",          no_argument,       0,        ARG_SOLO_CB_IN_READNAME},
+    {(char*)"solo-barcode-mate",            required_argument, 0,        ARG_SOLO_BARCODE_MATE},
+    {(char*)"solo-cb-whitelist",            required_argument, 0,        ARG_SOLO_CB_WHITELIST},
+    {(char*)"solo-cb-start",                required_argument, 0,        ARG_SOLO_CB_START},
+    {(char*)"solo-cb-len",                  required_argument, 0,        ARG_SOLO_CB_LEN},
+    {(char*)"solo-umi-start",               required_argument, 0,        ARG_SOLO_UMI_START},
+    {(char*)"solo-umi-len",                 required_argument, 0,        ARG_SOLO_UMI_LEN},
+    {(char*)"solo-cb-match",                required_argument, 0,        ARG_SOLO_CB_MATCH},
+    {(char*)"solo-emit-raw",                no_argument,       0,        ARG_SOLO_EMIT_RAW},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
     {(char*)"novel-splicesite-outfile",      required_argument, 0,        ARG_NOVEL_SPLICESITE_OUTFILE},
     {(char*)"secondary",        no_argument,       0,        ARG_SECONDARY},
@@ -1699,6 +1712,22 @@ static void parseOption(int next_option, const char *arg) {
         case ARG_GENE_ANNOTATION: geneAnnotationFile = arg; break;
         case ARG_GENE_FEATURE: geneFeatureStr = arg; break;
         case ARG_GENE_STRAND: geneStrandStr = arg; break;
+        case ARG_SOLO_CB_IN_READNAME: soloParams.mode = SOLO_INPUT_READNAME; break;
+        case ARG_SOLO_BARCODE_MATE:
+            soloParams.mode = SOLO_INPUT_MATE;
+            soloParams.barcodeMate = parseInt(1, "--solo-barcode-mate must be 1 or 2", arg);
+            break;
+        case ARG_SOLO_CB_WHITELIST: soloWhitelistFile = arg; break;
+        case ARG_SOLO_CB_START:  soloParams.cbStart  = parseInt(1, "--solo-cb-start must be >= 1", arg); break;
+        case ARG_SOLO_CB_LEN:    soloParams.cbLen    = parseInt(1, "--solo-cb-len must be >= 1", arg); break;
+        case ARG_SOLO_UMI_START: soloParams.umiStart = parseInt(1, "--solo-umi-start must be >= 1", arg); break;
+        case ARG_SOLO_UMI_LEN:   soloParams.umiLen   = parseInt(1, "--solo-umi-len must be >= 1", arg); break;
+        case ARG_SOLO_CB_MATCH:
+            if(strcmp(arg, "Exact") == 0)    soloParams.correct1MM = false;
+            else if(strcmp(arg, "1MM") == 0) soloParams.correct1MM = true;
+            else { cerr << "Error: --solo-cb-match must be Exact or 1MM" << endl; throw 1; }
+            break;
+        case ARG_SOLO_EMIT_RAW: soloParams.emitRaw = true; break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
         case ARG_NOVEL_SPLICESITE_OUTFILE: novelSpliceSiteOutfile = arg; break;
         case ARG_SECONDARY: secondary = true; break;
@@ -1920,6 +1949,15 @@ static void parseOptions(int argc, const char **argv) {
         scoreMin.init(SIMPLE_FUNC_LINEAR, 0.0f, -1.0f);
     }
     
+	if(soloParams.mode == SOLO_INPUT_MATE && soloParams.barcodeMate == 1) {
+		// Internally the barcode is always mate 2 (STARsolo's cDNA-first
+		// convention). Swapping the file lists here means the rest of the
+		// pipeline needs no special case.
+		EList<string> tmp = mates1;
+		mates1 = mates2;
+		mates2 = tmp;
+		soloParams.barcodeMate = 2;
+	}
 	if(mates1.size() != mates2.size()) {
 		cerr << "Error: " << mates1.size() << " mate files/sequences were specified with -1, but " << mates2.size() << endl
 		     << "mate files/sequences were specified with -2.  The same number of mate files/" << endl
@@ -2000,6 +2038,8 @@ static void parseOptions(int argc, const char **argv) {
 	}
 #endif
 }
+
+static SoloWhitelist soloWhitelist;   // immutable after load; shared by all threads
 
 static const char *argv0 = NULL;
 
@@ -3294,6 +3334,27 @@ static void multiseedSearchWorker_hisat2(void *vp) {
 			continue;
 		}
 		TReadId rdid = ps->rdid();
+
+		// Single-cell: pull the cell barcode and UMI off the read, then align
+		// only the cDNA. Done here, before any alignment work, so the barcode
+		// read is never aligned and the rest of the pipeline sees an ordinary
+		// unpaired read.
+		if(soloParams.enabled()) {
+			Read& rda = ps->bufa();
+			if(soloParams.mode == SOLO_INPUT_READNAME) {
+				soloExtractFromName(rda.name.toZBuf(), rda.name.length(),
+				                    soloParams, rda.solo);
+			} else if(paired) {
+				// mates1/mates2 were normalised at startup so the barcode is
+				// always mate 2; mate 1 carries the cDNA.
+				Read& rdb = ps->bufb();
+				soloExtractFromSeq(rdb.patFw.toZBuf(), rdb.qual.toZBuf(),
+				                   rdb.length(), soloParams, rda.solo);
+				paired = false;   // align the cDNA mate alone
+			}
+			soloWhitelist.resolve(rda.solo, soloParams.correct1MM);
+		}
+
         if(nthreads > 1 && useTempSpliceSite) {
             assert_gt(tid, 0);
             assert_leq(tid, thread_rids.size());
@@ -4042,6 +4103,23 @@ static void driver(
 			sam_print_zu,
             sam_print_xs_a,
             sam_print_nh);
+
+        // Cell-barcode whitelist.  Loaded once, immutable, shared by all
+        // threads.  Without one, barcodes are taken at face value.
+        if(soloParams.enabled()) {
+            if(soloWhitelistFile != "") {
+                std::string wlErr;
+                if(!soloWhitelist.load(soloWhitelistFile, soloParams.cbLen, wlErr)) {
+                    cerr << "Error: " << wlErr << endl;
+                    throw 1;
+                }
+                if(gVerbose) {
+                    cerr << "Loaded barcode whitelist: " << soloWhitelist.size()
+                         << " barcodes from " << soloWhitelistFile << endl;
+                }
+            }
+            samc.setSolo(&soloParams, &soloWhitelist);
+        }
 
         // Gene model for GX:Z/GN:Z.  Loaded after the index so that the
         // sidecar's #ref lines can be checked against the index's own

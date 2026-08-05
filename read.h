@@ -26,6 +26,7 @@
 #include "sstring.h"
 #include "filebuf.h"
 #include "util.h"
+#include "solo_barcode.h"
 
 enum rna_strandness_format {
     RNA_STRANDNESS_UNKNOWN = 0,
@@ -51,6 +52,7 @@ struct Read {
 	Read(const char *nm, const char *seq, const char *ql) { init(nm, seq, ql); }
 
 	void reset() {
+		solo.reset();
 		rdid = 0;
 		endid = 0;
 		alts = 0;
@@ -342,6 +344,7 @@ struct Read {
 	SStringExpandable<char> readOrigBuf;
 
 	BTString name;      // read name
+	SoloRead solo;      // cell barcode / UMI state (single-cell)
 	TReadId  rdid;      // 0-based id based on pair's offset in read file(s)
 	TReadId  endid;     // 0-based id based on pair's offset in read file(s)
 	                    // and which mate ("end") this is
