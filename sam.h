@@ -29,6 +29,7 @@
 #include "scoring.h"
 #include "alt.h"
 #include "filebuf.h"
+#include "gene_model.h"
 
 enum {
 	// Comments use language from v1.4-r962 spec
@@ -114,6 +115,9 @@ public:
               bool print_zu,
               bool print_xs_a,
               bool print_nh) :
+		geneModel_(NULL),
+		gmFeature_(GENE_FEATURE_EXONIC),
+		gmStrand_(GENE_STRAND_UNSTRANDED),
 		truncQname_(truncQname),
 		omitsec_(omitsec),
 		noUnal_(noUnal),
@@ -338,7 +342,23 @@ public:
 		return noUnal_;
 	}
 
+	/**
+	 * Attach a gene model, enabling GX:Z/GN:Z output.  A setter rather than a
+	 * constructor parameter: the constructor already takes ~50 arguments, and
+	 * growing it would maximise rebase conflicts against upstream.  The model
+	 * is immutable once loaded, so sharing it across threads needs no locking.
+	 */
+	void setGeneModel(const GeneModel* gm, GeneFeature feat, GeneStrand strand) {
+		geneModel_ = gm;
+		gmFeature_ = feat;
+		gmStrand_  = strand;
+	}
+
 protected:
+
+	const GeneModel* geneModel_;  // gene model for GX:Z/GN:Z, or NULL
+	GeneFeature      gmFeature_;  // Gene (exonic) vs GeneFull (gene body)
+	GeneStrand       gmStrand_;   // library strandedness
 
 	bool truncQname_;   // truncate QNAME to 255 chars?
 	bool omitsec_;      // omit secondary 
@@ -979,7 +999,68 @@ const
             o.append(buf);
         }
     }
-    
+    // GX:Z / GN:Z -- gene assignment, when a gene model was supplied.
+    // Reference blocks come from the CIGAR rather than the edit list so they
+    // describe exactly the record being written here.
+    if(geneModel_ != NULL && geneModel_->loaded() && staln.cigarBuilt()) {
+        // SamConfig is shared by every worker thread, so these scratch buffers
+        // must not be members.  thread_local keeps them allocated across calls
+        // without introducing a race.
+        static thread_local std::vector<std::pair<int64_t, int64_t> > gmBlocks_;
+        static thread_local std::vector<uint32_t> gmGenes_, gmScratch_;
+        std::vector<std::pair<int64_t, int64_t> >& blocks = gmBlocks_;
+        blocks.clear();
+        int64_t pos = (int64_t)res.refoff();
+        int64_t blockStart = pos;
+        bool haveBlock = false;
+        const EList<char>&   ops  = staln.cigarOps();
+        const EList<size_t>& runs = staln.cigarRuns();
+        for(size_t i = 0; i < ops.size(); i++) {
+            char op = ops[i];
+            int64_t run = (int64_t)runs[i];
+            if(op == 'M' || op == '=' || op == 'X' || op == 'D') {
+                if(!haveBlock) { blockStart = pos; haveBlock = true; }
+                pos += run;
+            } else if(op == 'N') {
+                if(haveBlock) { blocks.push_back(std::make_pair(blockStart, pos)); haveBlock = false; }
+                pos += run;
+            }
+            // I, S, H consume no reference
+        }
+        if(haveBlock) blocks.push_back(std::make_pair(blockStart, pos));
+
+        gmGenes_.clear();
+        if(!blocks.empty()) {
+            geneModel_->assignGenes((int32_t)res.refid(),
+                                    blocks,
+                                    res.fw(),
+                                    gmFeature_,
+                                    gmStrand_,
+                                    gmGenes_,
+                                    gmScratch_);
+        }
+        WRITE_SEP();
+        o.append("GX:Z:");
+        if(gmGenes_.empty()) {
+            o.append("-");
+        } else {
+            for(size_t i = 0; i < gmGenes_.size(); i++) {
+                if(i > 0) o.append(',');
+                o.append(geneModel_->geneId(gmGenes_[i]));
+            }
+        }
+        WRITE_SEP();
+        o.append("GN:Z:");
+        if(gmGenes_.empty()) {
+            o.append("-");
+        } else {
+            for(size_t i = 0; i < gmGenes_.size(); i++) {
+                if(i > 0) o.append(',');
+                o.append(geneModel_->geneName(gmGenes_[i]));
+            }
+        }
+    }
+
     bool snp_first = true;
     index_t prev_snp_idx = INDEX_MAX;
     size_t len_trimmed = rd.length() - res.trimmed5p(true) - res.trimmed3p(true);

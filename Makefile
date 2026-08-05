@@ -142,7 +142,8 @@ SEARCH_CPPS = qual.cpp pat.cpp \
 	aligner_swsse_loc_u8.cpp \
 	aligner_swsse_ee_u8.cpp \
 	aligner_driver.cpp \
-	splice_site.cpp 
+	splice_site.cpp \
+	gene_model.cpp
 
 BUILD_CPPS = diff_sample.cpp
 

@@ -253,6 +253,9 @@ static SimpleFunc penNoncanIntronLen;
 static size_t minIntronLen;
 static size_t maxIntronLen;
 static string knownSpliceSiteInfile;  //
+static string geneAnnotationFile;     // .ht2gm gene model for GX:Z/GN:Z
+static string geneFeatureStr;         // "Gene" (exonic) or "GeneFull" (body)
+static string geneStrandStr;          // "Unstranded", "Forward", "Reverse"
 static string novelSpliceSiteInfile;  //
 static string novelSpliceSiteOutfile; //
 static bool secondary;
@@ -498,6 +501,9 @@ static void resetOptions() {
     minIntronLen = 20;
     maxIntronLen = 500000;
     knownSpliceSiteInfile = "";
+    geneAnnotationFile = "";
+    geneFeatureStr = "Gene";
+    geneStrandStr = "Unstranded";
     novelSpliceSiteInfile = "";
     novelSpliceSiteOutfile = "";
     secondary = false;       // allow secondary alignments
@@ -731,6 +737,9 @@ static struct option long_options[] = {
     {(char*)"min-intronlen",  required_argument,   0,        ARG_MIN_INTRONLEN},
     {(char*)"max-intronlen",  required_argument,   0,        ARG_MAX_INTRONLEN},
     {(char*)"known-splicesite-infile",       required_argument, 0,        ARG_KNOWN_SPLICESITE_INFILE},
+    {(char*)"gene-annotation",              required_argument, 0,        ARG_GENE_ANNOTATION},
+    {(char*)"gene-feature",                 required_argument, 0,        ARG_GENE_FEATURE},
+    {(char*)"gene-strand",                  required_argument, 0,        ARG_GENE_STRAND},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
     {(char*)"novel-splicesite-outfile",      required_argument, 0,        ARG_NOVEL_SPLICESITE_OUTFILE},
     {(char*)"secondary",        no_argument,       0,        ARG_SECONDARY},
@@ -1687,6 +1696,9 @@ static void parseOption(int next_option, const char *arg) {
             break;
         }
         case ARG_KNOWN_SPLICESITE_INFILE: knownSpliceSiteInfile = arg; break;
+        case ARG_GENE_ANNOTATION: geneAnnotationFile = arg; break;
+        case ARG_GENE_FEATURE: geneFeatureStr = arg; break;
+        case ARG_GENE_STRAND: geneStrandStr = arg; break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
         case ARG_NOVEL_SPLICESITE_OUTFILE: novelSpliceSiteOutfile = arg; break;
         case ARG_SECONDARY: secondary = true; break;
@@ -4030,6 +4042,42 @@ static void driver(
 			sam_print_zu,
             sam_print_xs_a,
             sam_print_nh);
+
+        // Gene model for GX:Z/GN:Z.  Loaded after the index so that the
+        // sidecar's #ref lines can be checked against the index's own
+        // sequences -- a model built from a different assembly would otherwise
+        // produce plausible-looking but entirely wrong gene assignments.
+        GeneModel geneModel;
+        if(geneAnnotationFile != "") {
+            std::vector<std::string> gmRefnames;
+            std::vector<int64_t> gmReflens;
+            for(size_t i = 0; i < refnames.size(); i++) gmRefnames.push_back(refnames[i]);
+            for(size_t i = 0; i < reflens.size(); i++)  gmReflens.push_back((int64_t)reflens[i]);
+            std::string gmErr;
+            if(!geneModel.load(geneAnnotationFile, gmRefnames, gmReflens, gmErr)) {
+                cerr << "Error: " << gmErr << endl;
+                throw 1;
+            }
+            GeneFeature feat = GENE_FEATURE_EXONIC;
+            if(geneFeatureStr == "GeneFull")     feat = GENE_FEATURE_BODY;
+            else if(geneFeatureStr != "Gene") {
+                cerr << "Error: --gene-feature must be Gene or GeneFull" << endl;
+                throw 1;
+            }
+            GeneStrand gstrand = GENE_STRAND_UNSTRANDED;
+            if(geneStrandStr == "Forward")      gstrand = GENE_STRAND_FORWARD;
+            else if(geneStrandStr == "Reverse") gstrand = GENE_STRAND_REVERSE;
+            else if(geneStrandStr != "Unstranded") {
+                cerr << "Error: --gene-strand must be Unstranded, Forward or Reverse" << endl;
+                throw 1;
+            }
+            samc.setGeneModel(&geneModel, feat, gstrand);
+            if(gVerbose) {
+                cerr << "Loaded gene model: " << geneModel.numGenes()
+                     << " genes from " << geneAnnotationFile << endl;
+            }
+        }
+
 		// Set up hit sink; if sanityCheck && !os.empty() is true,
 		// then instruct the sink to "retain" hits in a vector in
 		// memory so that we can easily sanity check them later on

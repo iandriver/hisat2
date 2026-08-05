@@ -824,7 +824,17 @@ public:
 	 * char buffer.
 	 */
 	void writeMdz(BTString* o, char* oc) const;
-	
+
+	/**
+	 * Access the built CIGAR.  Deriving reference blocks from the CIGAR rather
+	 * than from the edit list guarantees they describe exactly the record that
+	 * is written to the SAM file, which is what any downstream counting tool
+	 * sees.  Only valid once buildCigar() has run.
+	 */
+	bool                 cigarBuilt() const { return cigCalc_; }
+	const EList<char>&   cigarOps()   const { return cigOp_;   }
+	const EList<size_t>& cigarRuns()  const { return cigRun_;  }
+
 	/**
 	 * Check internal consistency.
 	 */
