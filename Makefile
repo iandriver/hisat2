@@ -144,7 +144,8 @@ SEARCH_CPPS = qual.cpp pat.cpp \
 	aligner_driver.cpp \
 	splice_site.cpp \
 	gene_model.cpp \
-	solo_barcode.cpp
+	solo_barcode.cpp \
+	solo_counter.cpp
 
 BUILD_CPPS = diff_sample.cpp
 

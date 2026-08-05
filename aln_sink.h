@@ -23,6 +23,7 @@
 #include <limits>
 #include "read.h"
 #include "unique.h"
+#include "solo_counter.h"
 #include "sam.h"
 #include "ds.h"
 #include "simple_func.h"
@@ -1060,6 +1061,7 @@ public:
 		g_(g),
 		rp_(rp),
         threadid_(threadId),
+        solo_(NULL),
         mapq_(mapq),
     	secondary_(secondary),
         ssdb_(ssdb),
@@ -1097,6 +1099,9 @@ public:
 	{
 		assert(rp_.repOk());
 	}
+
+	/** Attach this thread's single-cell accumulator (NULL disables counting). */
+	void setSoloCounter(SoloCounterThread* s) { solo_ = s; }
 
 	/**
 	 * Initialize the wrapper with a new read pair and return an
@@ -1492,6 +1497,7 @@ protected:
 	TReadId           rdid_;  // read ID (potentially used for ordering)
 	EList<AlnRes>     rs1_;   // paired alignments for mate #1
 	EList<AlnRes>     rs2_;   // paired alignments for mate #2
+	SoloCounterThread* solo_; // per-thread single-cell accumulator, or NULL
 	EList<AlnRes>     rs1u_;  // unpaired alignments for mate #1
 	EList<AlnRes>     rs2u_;  // unpaired alignments for mate #2
 	EList<size_t>     select1_; // parallel to rs1_/rs2_ - which to report
@@ -1961,6 +1967,13 @@ void AlnSinkWrap<index_t>::finishRead(
 	obuf_.clear();
 	OutputQueueMark qqm(g_.outq(), obuf_, rdid_, threadid_);
 	assert(init_);
+	// Single-cell counting. Deliberately placed before the reporting block:
+	// every candidate alignment is still in scope here, and selectByScore has
+	// not yet broken score ties at random, so counts do not depend on that
+	// choice. It also runs when SAM output is suppressed.
+	if(solo_ != NULL && rd1_ != NULL) {
+		solo_->addRead(*rd1_, &rs1u_, rs1u_.size());
+	}
 	if(!suppressSeedSummary) {
 		if(sr1 != NULL) {
 			assert(rd1_ != NULL);

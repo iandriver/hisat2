@@ -258,6 +258,8 @@ static string geneFeatureStr;         // "Gene" (exonic) or "GeneFull" (body)
 static string geneStrandStr;          // "Unstranded", "Forward", "Reverse"
 static SoloParams soloParams;         // cell barcode / UMI geometry
 static string soloWhitelistFile;      // 10x barcode whitelist
+static string soloOutDir;             // Solo.out directory; enables counting
+static string soloUmiDedupStr;        // Exact / 1MM_CR / 1MM_All / NoDedup
 static string novelSpliceSiteInfile;  //
 static string novelSpliceSiteOutfile; //
 static bool secondary;
@@ -508,6 +510,8 @@ static void resetOptions() {
     geneStrandStr = "Unstranded";
     soloParams = SoloParams();
     soloWhitelistFile = "";
+    soloOutDir = "";
+    soloUmiDedupStr = "1MM_CR";
     novelSpliceSiteInfile = "";
     novelSpliceSiteOutfile = "";
     secondary = false;       // allow secondary alignments
@@ -753,6 +757,8 @@ static struct option long_options[] = {
     {(char*)"solo-umi-len",                 required_argument, 0,        ARG_SOLO_UMI_LEN},
     {(char*)"solo-cb-match",                required_argument, 0,        ARG_SOLO_CB_MATCH},
     {(char*)"solo-emit-raw",                no_argument,       0,        ARG_SOLO_EMIT_RAW},
+    {(char*)"solo-out-dir",                 required_argument, 0,        ARG_SOLO_OUT_DIR},
+    {(char*)"solo-umi-dedup",               required_argument, 0,        ARG_SOLO_UMI_DEDUP},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
     {(char*)"novel-splicesite-outfile",      required_argument, 0,        ARG_NOVEL_SPLICESITE_OUTFILE},
     {(char*)"secondary",        no_argument,       0,        ARG_SECONDARY},
@@ -1728,6 +1734,8 @@ static void parseOption(int next_option, const char *arg) {
             else { cerr << "Error: --solo-cb-match must be Exact or 1MM" << endl; throw 1; }
             break;
         case ARG_SOLO_EMIT_RAW: soloParams.emitRaw = true; break;
+        case ARG_SOLO_OUT_DIR: soloOutDir = arg; break;
+        case ARG_SOLO_UMI_DEDUP: soloUmiDedupStr = arg; break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
         case ARG_NOVEL_SPLICESITE_OUTFILE: novelSpliceSiteOutfile = arg; break;
         case ARG_SECONDARY: secondary = true; break;
@@ -2040,6 +2048,7 @@ static void parseOptions(int argc, const char **argv) {
 }
 
 static SoloWhitelist soloWhitelist;   // immutable after load; shared by all threads
+static SoloCounter   soloCounter;     // per-thread arenas, merged after join
 
 static const char *argv0 = NULL;
 
@@ -3252,6 +3261,10 @@ static void multiseedSearchWorker_hisat2(void *vp) {
                                    secondary,     // secondary alignments
                                    no_spliced_alignment ? NULL : ssdb,
                                    thread_rids_mindist);
+    if(soloCounter.enabled()) {
+        // Accumulators are pre-allocated; workers only ever touch their own.
+        msinkwrap.setSoloCounter(soloCounter.threadFor(tid > 0 ? tid - 1 : 0));
+    }
     
     SplicedAligner<index_t, local_index_t> splicedAligner(
                                                           gfm,
@@ -4154,6 +4167,30 @@ static void driver(
                 cerr << "Loaded gene model: " << geneModel.numGenes()
                      << " genes from " << geneAnnotationFile << endl;
             }
+
+            if(soloOutDir != "") {
+                if(!soloParams.enabled()) {
+                    cerr << "Error: --solo-out-dir requires a barcode source "
+                            "(--solo-barcode-mate or --solo-cb-in-readname)" << endl;
+                    throw 1;
+                }
+                if(!soloWhitelist.loaded()) {
+                    cerr << "Error: --solo-out-dir requires --solo-cb-whitelist, "
+                            "since matrix columns are whitelist barcodes" << endl;
+                    throw 1;
+                }
+                SoloUmiDedup dd = SOLO_UMI_1MM_CR;
+                if(soloUmiDedupStr == "Exact")        dd = SOLO_UMI_EXACT;
+                else if(soloUmiDedupStr == "1MM_All") dd = SOLO_UMI_1MM_ALL;
+                else if(soloUmiDedupStr == "NoDedup") dd = SOLO_UMI_NODEDUP;
+                else if(soloUmiDedupStr != "1MM_CR") {
+                    cerr << "Error: --solo-umi-dedup must be Exact, 1MM_CR, 1MM_All or NoDedup" << endl;
+                    throw 1;
+                }
+                soloCounter.init(&geneModel, &soloWhitelist, &soloParams,
+                                 feat, gstrand, dd, soloOutDir);
+                soloCounter.reserveThreads((size_t)nthreads + 1);
+            }
         }
 
 		// Set up hit sink; if sanityCheck && !os.empty() is true,
@@ -4321,6 +4358,18 @@ static void driver(
                 }
             }
         }
+		// Worker threads have joined, so every arena is complete and the merge
+		// needs no locking.
+		if(soloCounter.enabled()) {
+			std::string soloErr;
+			if(!soloCounter.finalize(soloErr)) {
+				cerr << "Error writing single-cell output: " << soloErr << endl;
+				throw 1;
+			}
+			if(!gQuiet) {
+				cerr << "Wrote single-cell matrices to " << soloOutDir << endl;
+			}
+		}
 		oq.flush(true);
 		assert_eq(oq.numStarted(), oq.numFinished());
 		assert_eq(oq.numStarted(), oq.numFlushed());
