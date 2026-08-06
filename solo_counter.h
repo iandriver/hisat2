@@ -64,10 +64,51 @@ struct SoloRec {
  * These are parked until finalize(), by which point the exact-match counts
  * exist, and resolved then.
  */
+/** One allele observation: which variant, and whether the read carried ALT. */
+struct SoloAllelicRec {
+    uint32_t cb;
+    uint32_t variantAndAllele;   // slot in the low 31 bits, ALT flag in bit 31
+    uint64_t umi;
+
+    static const uint32_t kAltBit = 0x80000000u;
+    uint32_t variant() const { return variantAndAllele & ~kAltBit; }
+    bool     isAlt()   const { return (variantAndAllele & kAltBit) != 0; }
+};
+
 struct SoloAmbigRec {
     uint32_t cbRaw;          // packed barcode as sequenced
     uint32_t geneAndFlags;
     uint64_t umi;
+};
+
+/**
+ * Positions of the index's SNPs, per reference sequence.
+ *
+ * HISAT2 stores variants in joined-genome coordinates and keeps their real
+ * rsIDs (unlike genes, whose identity the index discards), so this converts
+ * them once to per-chromosome coordinates and sorts them for range queries.
+ * Immutable after build(), so lookups need no locking.
+ */
+class SoloVariantIndex {
+public:
+    /** pos is 0-based, per-chromosome. altIdx indexes ALTDB::alts(). */
+    void add(int32_t refid, int64_t pos, uint32_t altIdx, const std::string& name);
+    void build();
+    size_t size() const { return nameOff_.size(); }
+    bool empty() const { return nameOff_.empty(); }
+
+    /** Variant slots whose position falls in [s, e) on refid. */
+    void query(int32_t refid, int64_t s, int64_t e, std::vector<uint32_t>& out) const;
+    /** Slot for an ALTDB index, or 0xffffffff if that alt is not a tracked SNP. */
+    uint32_t slotForAlt(uint32_t altIdx) const;
+    const char* name(uint32_t slot) const { return &nameBlob_[nameOff_[slot]]; }
+
+private:
+    struct Entry { int64_t pos; uint32_t slot; };
+    std::vector<std::vector<Entry> > byRef_;   // sorted by pos
+    std::vector<uint32_t> nameOff_;
+    std::vector<char>     nameBlob_;
+    std::vector<uint32_t> altToSlot_;          // ALTDB index -> slot
 };
 
 class SoloCounter;
@@ -97,16 +138,18 @@ private:
     SoloCounter* parent_;
     std::vector<SoloRec>      recs_;
     std::vector<SoloAmbigRec> ambig_;
+    std::vector<SoloAllelicRec> allelic_;
     // Per-thread tallies, summed at finalize.
     uint64_t nReads_ = 0, nValidCB_ = 0, nAmbigCB_ = 0, nNoCB_ = 0;
     uint64_t nUnmapped_ = 0, nNoGene_ = 0, nMultiGene_ = 0, nCounted_ = 0;
+    uint64_t nRefObs_ = 0, nAltObs_ = 0;
 };
 
 /** Owns configuration, merges the per-thread arenas, and writes the matrices. */
 class SoloCounter {
 public:
     SoloCounter()
-        : gm_(NULL), wl_(NULL), params_(NULL),
+        : gm_(NULL), wl_(NULL), params_(NULL), vi_(NULL),
           feature_(GENE_FEATURE_EXONIC), strand_(GENE_STRAND_UNSTRANDED),
           dedup_(SOLO_UMI_1MM_CR) {}
     ~SoloCounter();
@@ -118,6 +161,10 @@ public:
               GeneStrand strand,
               SoloUmiDedup dedup,
               const std::string& outDir);
+
+    /** Enables allelic output. The index must outlive the counter. */
+    void setVariantIndex(const SoloVariantIndex* vi) { vi_ = vi; }
+    const SoloVariantIndex* variantIndex() const { return vi_; }
 
     bool enabled() const { return gm_ != NULL && wl_ != NULL; }
 
@@ -143,10 +190,12 @@ private:
                      const std::vector<uint32_t>& tally,
                      std::string& err) const;
     bool writeSummary(std::string& err) const;
+    bool writeAllelic(std::vector<SoloAllelicRec>& allelic, std::string& err);
 
     const GeneModel*     gm_;
     const SoloWhitelist* wl_;
     const SoloParams*    params_;
+    const SoloVariantIndex* vi_;
     GeneFeature feature_;
     GeneStrand  strand_;
     SoloUmiDedup dedup_;
@@ -157,6 +206,8 @@ private:
     uint64_t nReads_ = 0, nValidCB_ = 0, nAmbigCB_ = 0, nAmbigResolved_ = 0;
     uint64_t nNoCB_ = 0, nUnmapped_ = 0, nNoGene_ = 0, nMultiGene_ = 0;
     uint64_t nCounted_ = 0, nUMIs_ = 0, nCells_ = 0, nGenesDetected_ = 0;
+    uint64_t nRefUMIs_ = 0, nAltUMIs_ = 0, nVariantsSeen_ = 0;
+    uint64_t nRefObs_ = 0, nAltObs_ = 0;
 };
 
 #endif /* SOLO_COUNTER_H_ */

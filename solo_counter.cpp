@@ -78,6 +78,49 @@ bool makeDirs(const std::string& path) {
 
 } // namespace
 
+void SoloVariantIndex::add(int32_t refid, int64_t pos, uint32_t altIdx,
+                           const std::string& name) {
+    if(refid < 0) return;
+    uint32_t slot = (uint32_t)nameOff_.size();
+    nameOff_.push_back((uint32_t)nameBlob_.size());
+    nameBlob_.insert(nameBlob_.end(), name.begin(), name.end());
+    nameBlob_.push_back('\0');
+    if((size_t)refid >= byRef_.size()) byRef_.resize(refid + 1);
+    Entry e; e.pos = pos; e.slot = slot;
+    byRef_[refid].push_back(e);
+    if(altIdx >= altToSlot_.size()) altToSlot_.resize(altIdx + 1, 0xffffffffu);
+    altToSlot_[altIdx] = slot;
+}
+
+namespace {
+bool entryLess(const std::pair<int64_t, uint32_t>& a, const std::pair<int64_t, uint32_t>& b) {
+    return a.first < b.first;
+}
+}
+
+void SoloVariantIndex::build() {
+    for(size_t r = 0; r < byRef_.size(); r++) {
+        std::sort(byRef_[r].begin(), byRef_[r].end(),
+                  [](const Entry& a, const Entry& b) { return a.pos < b.pos; });
+    }
+}
+
+uint32_t SoloVariantIndex::slotForAlt(uint32_t altIdx) const {
+    if(altIdx >= altToSlot_.size()) return 0xffffffffu;
+    return altToSlot_[altIdx];
+}
+
+void SoloVariantIndex::query(int32_t refid, int64_t s, int64_t e,
+                             std::vector<uint32_t>& out) const {
+    if(refid < 0 || (size_t)refid >= byRef_.size()) return;
+    const std::vector<Entry>& v = byRef_[refid];
+    if(v.empty()) return;
+    // Variants are points, so a plain lower_bound on position suffices.
+    size_t lo = 0, hi = v.size();
+    while(lo < hi) { size_t mid = (lo + hi) / 2; if(v[mid].pos < s) lo = mid + 1; else hi = mid; }
+    for(size_t i = lo; i < v.size() && v[i].pos < e; i++) out.push_back(v[i].slot);
+}
+
 SoloCounter::~SoloCounter() {
     for(size_t i = 0; i < threads_.size(); i++) delete threads_[i];
 }
@@ -161,6 +204,38 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         for(size_t g = 0; g < blockGenes.size(); g++) genes.push_back(blockGenes[g]);
     }
 
+    // Allele observations.  A read that took an alternate path through the
+    // graph carries an edit tagged with that variant's ALTDB index; any tracked
+    // variant inside the alignment without such an edit was seen as reference.
+    // Restricted to uniquely-aligned reads: for a multi-locus read the alleles
+    // it supports are ambiguous.
+    const SoloVariantIndex* vi = p->variantIndex();
+    if(vi != NULL && !vi->empty() && nresults == 1 && sr.corrected()) {
+        static thread_local std::vector<uint32_t> altSeen, spanned;
+        const AlnRes& rs = (*results)[0];
+        altSeen.clear(); spanned.clear();
+        const EList<Edit>& eds = rs.ned();
+        for(size_t k = 0; k < eds.size(); k++) {
+            uint32_t slot = vi->slotForAlt((uint32_t)eds[k].snpID);
+            if(slot != 0xffffffffu) altSeen.push_back(slot);
+        }
+        std::sort(altSeen.begin(), altSeen.end());
+        for(size_t b = 0; b < blocks.size(); b++) {
+            vi->query((int32_t)rs.refid(), blocks[b].first, blocks[b].second, spanned);
+        }
+        std::sort(spanned.begin(), spanned.end());
+        spanned.erase(std::unique(spanned.begin(), spanned.end()), spanned.end());
+        for(size_t k = 0; k < spanned.size(); k++) {
+            bool isAlt = std::binary_search(altSeen.begin(), altSeen.end(), spanned[k]);
+            SoloAllelicRec ar;
+            ar.cb = sr.cbIdx;
+            ar.variantAndAllele = spanned[k] | (isAlt ? SoloAllelicRec::kAltBit : 0u);
+            ar.umi = sr.umiPacked;
+            allelic_.push_back(ar);
+            if(isAlt) nAltObs_++; else nRefObs_++;
+        }
+    }
+
     std::sort(genes.begin(), genes.end());
     genes.erase(std::unique(genes.begin(), genes.end()), genes.end());
 
@@ -188,6 +263,7 @@ bool SoloCounter::finalize(std::string& err) {
 
     std::vector<SoloRec> all;
     std::vector<SoloAmbigRec> ambig;
+    std::vector<SoloAllelicRec> allelic;
     size_t total = 0;
     for(size_t i = 0; i < threads_.size(); i++) total += threads_[i]->recs_.size();
     all.reserve(total);
@@ -195,6 +271,8 @@ bool SoloCounter::finalize(std::string& err) {
         SoloCounterThread* t = threads_[i];
         all.insert(all.end(), t->recs_.begin(), t->recs_.end());
         ambig.insert(ambig.end(), t->ambig_.begin(), t->ambig_.end());
+        allelic.insert(allelic.end(), t->allelic_.begin(), t->allelic_.end());
+        nRefObs_ += t->nRefObs_; nAltObs_ += t->nAltObs_;
         nReads_ += t->nReads_; nValidCB_ += t->nValidCB_; nAmbigCB_ += t->nAmbigCB_;
         nNoCB_ += t->nNoCB_;   nUnmapped_ += t->nUnmapped_;
         nNoGene_ += t->nNoGene_; nMultiGene_ += t->nMultiGene_; nCounted_ += t->nCounted_;
@@ -202,6 +280,7 @@ bool SoloCounter::finalize(std::string& err) {
         // copy of the records rather than two.
         std::vector<SoloRec>().swap(t->recs_);
         std::vector<SoloAmbigRec>().swap(t->ambig_);
+        std::vector<SoloAllelicRec>().swap(t->allelic_);
     }
 
     // Ambiguous barcodes: now that the pass is complete, the exact-match count
@@ -357,7 +436,85 @@ bool SoloCounter::finalize(std::string& err) {
     }
 
     if(!writeMatrix(counts, tally, err)) return false;
+    if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
     if(!writeSummary(err)) return false;
+    return true;
+}
+
+bool SoloCounter::writeAllelic(std::vector<SoloAllelicRec>& allelic, std::string& err) {
+    // Deduplicate by UMI within each (cell, variant, allele), the same rule the
+    // gene matrix uses, so an allele is counted once per molecule rather than
+    // once per read.
+    std::sort(allelic.begin(), allelic.end(),
+              [](const SoloAllelicRec& a, const SoloAllelicRec& b) {
+                  if(a.cb != b.cb) return a.cb < b.cb;
+                  if(a.variantAndAllele != b.variantAndAllele)
+                      return a.variantAndAllele < b.variantAndAllele;
+                  return a.umi < b.umi;
+              });
+
+    std::vector<SoloAllelicRec> keys;   // one per (cell, variant, allele)
+    std::vector<uint32_t> refN, altN;
+    std::vector<SoloAllelicRec> uniq;
+    size_t i = 0;
+    while(i < allelic.size()) {
+        size_t j = i;
+        while(j < allelic.size() && allelic[j].cb == allelic[i].cb &&
+              allelic[j].variantAndAllele == allelic[i].variantAndAllele) j++;
+        uint32_t n = 0;
+        for(size_t k = i; k < j; ) {
+            size_t m = k;
+            while(m < j && allelic[m].umi == allelic[k].umi) m++;
+            n++;
+            k = m;
+        }
+        uniq.push_back(allelic[i]);
+        refN.push_back(allelic[i].isAlt() ? 0 : n);
+        altN.push_back(allelic[i].isAlt() ? n : 0);
+        if(allelic[i].isAlt()) nAltUMIs_ += n; else nRefUMIs_ += n;
+        i = j;
+    }
+
+    {
+        std::vector<uint32_t> vs;
+        for(size_t k = 0; k < uniq.size(); k++) vs.push_back(uniq[k].variant());
+        std::sort(vs.begin(), vs.end());
+        vs.erase(std::unique(vs.begin(), vs.end()), vs.end());
+        nVariantsSeen_ = vs.size();
+    }
+
+    std::string raw = outDir_ + "/Allelic/raw";
+    if(!makeDirs(raw)) { err = "could not create output directory: " + raw; return false; }
+    {
+        std::ofstream o((raw + "/features.tsv").c_str());
+        if(!o.good()) { err = "could not write Allelic features.tsv"; return false; }
+        for(size_t v = 0; v < vi_->size(); v++) o << vi_->name((uint32_t)v) << "\tVariant\n";
+    }
+    {
+        std::ofstream o((raw + "/barcodes.tsv").c_str());
+        if(!o.good()) { err = "could not write Allelic barcodes.tsv"; return false; }
+        char buf[40];
+        for(size_t b = 0; b < wl_->size(); b++) {
+            soloUnpack(wl_->codeAt((uint32_t)b), wl_->cbLen(), buf);
+            o << buf << "\n";
+        }
+    }
+    // Two matrices rather than one with an allele axis, so each can be read by
+    // the ordinary 10x readers and subtracted or ratioed directly.
+    const char* fname[2] = { "ref.mtx", "alt.mtx" };
+    for(int a = 0; a < 2; a++) {
+        const std::vector<uint32_t>& N = (a == 0) ? refN : altN;
+        size_t nz = 0;
+        for(size_t k = 0; k < N.size(); k++) if(N[k] > 0) nz++;
+        std::ofstream o((raw + "/" + fname[a]).c_str());
+        if(!o.good()) { err = std::string("could not write ") + fname[a]; return false; }
+        o << "%%MatrixMarket matrix coordinate integer general\n%\n";
+        o << vi_->size() << " " << wl_->size() << " " << nz << "\n";
+        for(size_t k = 0; k < N.size(); k++) {
+            if(N[k] == 0) continue;
+            o << (uniq[k].variant() + 1) << " " << (uniq[k].cb + 1) << " " << N[k] << "\n";
+        }
+    }
     return true;
 }
 
@@ -426,5 +583,10 @@ bool SoloCounter::writeSummary(std::string& err) const {
     o << "Barcodes With UMIs," << nCells_ << "\n";
     o << "Total Genes Detected," << nGenesDetected_ << "\n";
     o << "Total UMIs," << nUMIs_ << "\n";
+    if(vi_ != NULL && !vi_->empty()) {
+        o << "Variants Observed," << nVariantsSeen_ << "\n";
+        o << "Allelic UMIs: Reference," << nRefUMIs_ << "\n";
+        o << "Allelic UMIs: Alternate," << nAltUMIs_ << "\n";
+    }
     return true;
 }

@@ -260,6 +260,7 @@ static SoloParams soloParams;         // cell barcode / UMI geometry
 static string soloWhitelistFile;      // 10x barcode whitelist
 static string soloOutDir;             // Solo.out directory; enables counting
 static string soloUmiDedupStr;        // Exact / 1MM_CR / 1MM_All / NoDedup
+static bool   soloAllelic;            // emit per-cell REF/ALT variant matrices
 static string novelSpliceSiteInfile;  //
 static string novelSpliceSiteOutfile; //
 static bool secondary;
@@ -512,6 +513,7 @@ static void resetOptions() {
     soloWhitelistFile = "";
     soloOutDir = "";
     soloUmiDedupStr = "1MM_CR";
+    soloAllelic = false;
     novelSpliceSiteInfile = "";
     novelSpliceSiteOutfile = "";
     secondary = false;       // allow secondary alignments
@@ -759,6 +761,7 @@ static struct option long_options[] = {
     {(char*)"solo-emit-raw",                no_argument,       0,        ARG_SOLO_EMIT_RAW},
     {(char*)"solo-out-dir",                 required_argument, 0,        ARG_SOLO_OUT_DIR},
     {(char*)"solo-umi-dedup",               required_argument, 0,        ARG_SOLO_UMI_DEDUP},
+    {(char*)"solo-allelic",                 no_argument,       0,        ARG_SOLO_ALLELIC},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
     {(char*)"novel-splicesite-outfile",      required_argument, 0,        ARG_NOVEL_SPLICESITE_OUTFILE},
     {(char*)"secondary",        no_argument,       0,        ARG_SECONDARY},
@@ -1736,6 +1739,7 @@ static void parseOption(int next_option, const char *arg) {
         case ARG_SOLO_EMIT_RAW: soloParams.emitRaw = true; break;
         case ARG_SOLO_OUT_DIR: soloOutDir = arg; break;
         case ARG_SOLO_UMI_DEDUP: soloUmiDedupStr = arg; break;
+        case ARG_SOLO_ALLELIC: soloAllelic = true; break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
         case ARG_NOVEL_SPLICESITE_OUTFILE: novelSpliceSiteOutfile = arg; break;
         case ARG_SECONDARY: secondary = true; break;
@@ -2049,6 +2053,7 @@ static void parseOptions(int argc, const char **argv) {
 
 static SoloWhitelist soloWhitelist;   // immutable after load; shared by all threads
 static SoloCounter   soloCounter;     // per-thread arenas, merged after join
+static SoloVariantIndex soloVariants;  // index SNPs in per-chromosome coords
 
 static const char *argv0 = NULL;
 
@@ -4189,6 +4194,34 @@ static void driver(
                 }
                 soloCounter.init(&geneModel, &soloWhitelist, &soloParams,
                                  feat, gstrand, dd, soloOutDir);
+
+                // Variant-aware output. The index keeps real rsIDs for SNPs
+                // (unlike genes, whose identity it discards), but stores them
+                // in joined-genome coordinates, so convert once here.
+                if(soloAllelic && altdb != NULL) {
+                    const EList<ALT<index_t> >& alts = altdb->alts();
+                    const EList<string>& anames = altdb->altnames();
+                    size_t nsnp = 0;
+                    for(size_t ai = 0; ai < alts.size(); ai++) {
+                        if(!alts[ai].snp()) continue;
+                        index_t tidx = 0, toff = 0, tlen = 0;
+                        bool straddled = false;
+                        if(!gfm.joinedToTextOff(1, alts[ai].pos, tidx, toff, tlen,
+                                                true, straddled)) continue;
+                        soloVariants.add((int32_t)tidx, (int64_t)toff, (uint32_t)ai,
+                                         ai < anames.size() ? anames[ai] : string("."));
+                        nsnp++;
+                    }
+                    soloVariants.build();
+                    if(nsnp == 0) {
+                        cerr << "Error: --solo-allelic requires a SNP-aware index "
+                                "(hisat2-build --snp); this index contains no variants"
+                             << endl;
+                        throw 1;
+                    }
+                    soloCounter.setVariantIndex(&soloVariants);
+                    if(gVerbose) cerr << "Tracking " << nsnp << " variants for allelic output" << endl;
+                }
                 soloCounter.reserveThreads((size_t)nthreads + 1);
             }
         }
