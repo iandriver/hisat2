@@ -291,7 +291,22 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     }
 
     if(genes.empty())      { nNoGene_++;    return; }
-    if(genes.size() > 1)   { nMultiGene_++; return; }   // EM handling is F7
+    if(genes.size() > 1) {
+        nMultiGene_++;
+        // Keep the gene set when multimapper resolution is on: EM needs only
+        // this, not the alignments, which is what lets resolution happen at
+        // finalize without holding anything from the streaming pass.
+        if(p->multiMapper() != SOLO_MULTI_UNIQUE && sr.corrected()) {
+            SoloMultiRec mr;
+            mr.cb  = sr.cbIdx;
+            mr.off = (uint32_t)multiGenes_.size();
+            mr.n   = (uint32_t)genes.size();
+            mr.umi = sr.umiPacked;
+            for(size_t k = 0; k < genes.size(); k++) multiGenes_.push_back(genes[k]);
+            multi_.push_back(mr);
+        }
+        return;
+    }
 
     nCounted_++;
     if(sr.status == SOLO_CB_AMBIG) {
@@ -316,6 +331,8 @@ bool SoloCounter::finalize(std::string& err) {
     std::vector<SoloAmbigRec> ambig;
     std::vector<SoloAllelicRec> allelic;
     std::vector<SoloRec> velo;
+    std::vector<SoloMultiRec> multi;
+    std::vector<uint32_t> multiGenes;
     size_t total = 0;
     for(size_t i = 0; i < threads_.size(); i++) total += threads_[i]->recs_.size();
     all.reserve(total);
@@ -325,6 +342,16 @@ bool SoloCounter::finalize(std::string& err) {
         ambig.insert(ambig.end(), t->ambig_.begin(), t->ambig_.end());
         allelic.insert(allelic.end(), t->allelic_.begin(), t->allelic_.end());
         velo.insert(velo.end(), t->velo_.begin(), t->velo_.end());
+        // Gene-list offsets are thread-local, so rebase them onto the merged arena.
+        {
+            uint32_t base = (uint32_t)multiGenes.size();
+            for(size_t k = 0; k < t->multi_.size(); k++) {
+                SoloMultiRec mr = t->multi_[k];
+                mr.off += base;
+                multi.push_back(mr);
+            }
+            multiGenes.insert(multiGenes.end(), t->multiGenes_.begin(), t->multiGenes_.end());
+        }
         nRefObs_ += t->nRefObs_; nAltObs_ += t->nAltObs_;
         nReads_ += t->nReads_; nValidCB_ += t->nValidCB_; nAmbigCB_ += t->nAmbigCB_;
         nNoCB_ += t->nNoCB_;   nUnmapped_ += t->nUnmapped_;
@@ -335,6 +362,8 @@ bool SoloCounter::finalize(std::string& err) {
         std::vector<SoloAmbigRec>().swap(t->ambig_);
         std::vector<SoloAllelicRec>().swap(t->allelic_);
         std::vector<SoloRec>().swap(t->velo_);
+        std::vector<SoloMultiRec>().swap(t->multi_);
+        std::vector<uint32_t>().swap(t->multiGenes_);
     }
 
     // Ambiguous barcodes: now that the pass is complete, the exact-match count
@@ -521,6 +550,7 @@ bool SoloCounter::finalize(std::string& err) {
         }
     }
 
+    if(!multi.empty() && !writeMultiMatrix(counts, tally, multi, multiGenes, err)) return false;
     if(!velo.empty() && !writeVelocyto(velo, err)) return false;
     if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
     if(!writeSummary(err)) return false;
@@ -614,6 +644,128 @@ bool SoloCounter::writeFiltered(const std::vector<SoloRec>& counts,
             if(c == 0xffffffffu) continue;
             o << (counts[k].gene() + 1) << " " << (c + 1) << " " << tally[k] << "\n";
         }
+    }
+    return true;
+}
+
+bool SoloCounter::writeMultiMatrix(const std::vector<SoloRec>& counts,
+                                   const std::vector<uint32_t>& tally,
+                                   std::vector<SoloMultiRec>& multi,
+                                   const std::vector<uint32_t>& multiGenes,
+                                   std::string& err) {
+    // Collapse multi-gene reads to molecules first: the same UMI seen several
+    // times is one molecule, and distributing it once per read would inflate
+    // multimapper genes relative to unique ones.
+    // The gene list must participate in the ordering, not just its length.
+    // Two reads of the same molecule can carry different compatible gene sets,
+    // and picking whichever landed first would make the result depend on the
+    // thread count. Ordering by (fewest genes, then lexicographically) makes
+    // the choice deterministic and prefers the most specific assignment.
+    std::sort(multi.begin(), multi.end(),
+              [&](const SoloMultiRec& a, const SoloMultiRec& b) {
+                  if(a.cb != b.cb) return a.cb < b.cb;
+                  if(a.umi != b.umi) return a.umi < b.umi;
+                  if(a.n != b.n) return a.n < b.n;
+                  for(uint32_t k = 0; k < a.n; k++) {
+                      uint32_t ga = multiGenes[a.off + k], gb = multiGenes[b.off + k];
+                      if(ga != gb) return ga < gb;
+                  }
+                  return false;
+              });
+    std::vector<SoloMultiRec> mol;
+    for(size_t i = 0; i < multi.size(); ) {
+        size_t j = i;
+        while(j < multi.size() && multi[j].cb == multi[i].cb && multi[j].umi == multi[i].umi) j++;
+        mol.push_back(multi[i]);
+        i = j;
+    }
+    nMultiUMIs_ = mol.size();
+
+    // Unique counts, indexed for fast per-cell lookup.
+    std::map<std::pair<uint32_t, uint32_t>, double> acc;
+    for(size_t k = 0; k < counts.size(); k++)
+        acc[std::make_pair(counts[k].cb, counts[k].gene())] += (double)tally[k];
+
+    // Resolve per cell: EM over one cell's molecules, which is how STARsolo
+    // does it and keeps each problem small.
+    std::sort(mol.begin(), mol.end(),
+              [](const SoloMultiRec& a, const SoloMultiRec& b) { return a.cb < b.cb; });
+    for(size_t i = 0; i < mol.size(); ) {
+        size_t j = i;
+        while(j < mol.size() && mol[j].cb == mol[i].cb) j++;
+        uint32_t cb = mol[i].cb;
+
+        if(multiMode_ == SOLO_MULTI_UNIFORM) {
+            for(size_t k = i; k < j; k++)
+                for(uint32_t g = 0; g < mol[k].n; g++)
+                    acc[std::make_pair(cb, multiGenes[mol[k].off + g])] += 1.0 / (double)mol[k].n;
+        } else {
+            // Gene set for this cell: those with unique support plus any
+            // reachable from a multi-gene molecule.
+            std::map<uint32_t, double> theta;
+            for(size_t k = i; k < j; k++)
+                for(uint32_t g = 0; g < mol[k].n; g++)
+                    theta[multiGenes[mol[k].off + g]] = 0.0;
+            for(std::map<uint32_t, double>::iterator it = theta.begin(); it != theta.end(); ++it) {
+                std::map<std::pair<uint32_t, uint32_t>, double>::const_iterator u =
+                    acc.find(std::make_pair(cb, it->first));
+                // A pseudocount keeps a gene with no unique support reachable;
+                // initialising it at zero would pin it there forever.
+                it->second = (u == acc.end() ? 0.0 : u->second) + 1e-3;
+            }
+            for(int iter = 0; iter < 100; iter++) {
+                std::map<uint32_t, double> next;
+                for(std::map<uint32_t, double>::iterator it = theta.begin(); it != theta.end(); ++it)
+                    next[it->first] = 0.0;
+                for(size_t k = i; k < j; k++) {
+                    double sum = 0.0;
+                    for(uint32_t g = 0; g < mol[k].n; g++) sum += theta[multiGenes[mol[k].off + g]];
+                    if(sum <= 0.0) continue;
+                    for(uint32_t g = 0; g < mol[k].n; g++) {
+                        uint32_t gi = multiGenes[mol[k].off + g];
+                        next[gi] += theta[gi] / sum;
+                    }
+                }
+                double delta = 0.0;
+                for(std::map<uint32_t, double>::iterator it = next.begin(); it != next.end(); ++it) {
+                    std::map<std::pair<uint32_t, uint32_t>, double>::const_iterator u =
+                        acc.find(std::make_pair(cb, it->first));
+                    double base = (u == acc.end() ? 0.0 : u->second);
+                    double val = base + it->second + 1e-3;
+                    delta += std::abs(val - theta[it->first]);
+                    theta[it->first] = val;
+                }
+                if(delta < 1e-6) break;
+            }
+            // Fold the converged multimapper mass back onto the unique counts.
+            for(size_t k = i; k < j; k++) {
+                double sum = 0.0;
+                for(uint32_t g = 0; g < mol[k].n; g++) sum += theta[multiGenes[mol[k].off + g]];
+                if(sum <= 0.0) continue;
+                for(uint32_t g = 0; g < mol[k].n; g++) {
+                    uint32_t gi = multiGenes[mol[k].off + g];
+                    acc[std::make_pair(cb, gi)] += theta[gi] / sum;
+                }
+            }
+        }
+        i = j;
+    }
+
+    const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    std::string raw = outDir_ + "/" + featName + "/raw";
+    if(!makeDirs(raw)) { err = "could not create output directory: " + raw; return false; }
+    std::string fn = raw + (multiMode_ == SOLO_MULTI_UNIFORM
+                            ? "/UniqueAndMult-Uniform.mtx" : "/UniqueAndMult-EM.mtx");
+    std::ofstream o(fn.c_str());
+    if(!o.good()) { err = "could not write " + fn; return false; }
+    // "real", not "integer": distributing a molecule across genes yields
+    // fractional counts, and rounding here would lose the point of doing it.
+    o << "%%MatrixMarket matrix coordinate real general\n%\n";
+    o << gm_->numGenes() << " " << wl_->size() << " " << acc.size() << "\n";
+    o.setf(std::ios::fixed); o.precision(5);
+    for(std::map<std::pair<uint32_t, uint32_t>, double>::const_iterator it = acc.begin();
+        it != acc.end(); ++it) {
+        o << (it->first.second + 1) << " " << (it->first.first + 1) << " " << it->second << "\n";
     }
     return true;
 }
@@ -834,6 +986,9 @@ bool SoloCounter::writeSummary(std::string& err) const {
     o << "Barcodes With UMIs," << nCells_ << "\n";
     o << "Total Genes Detected," << nGenesDetected_ << "\n";
     o << "Total UMIs," << nUMIs_ << "\n";
+    if(multiMode_ != SOLO_MULTI_UNIQUE) {
+        o << "Multi-Gene UMIs Distributed," << nMultiUMIs_ << "\n";
+    }
     if(velocyto_) {
         o << "Velocyto Spliced," << nSpliced_ << "\n";
         o << "Velocyto Unspliced," << nUnspliced_ << "\n";

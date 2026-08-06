@@ -39,6 +39,13 @@ enum SoloCellFilter {
     SOLO_FILTER_EMPTYDROPS      // deferred to hisat2_solo_filter.py
 };
 
+/** What to do with reads whose alignments span several genes. */
+enum SoloMultiMapper {
+    SOLO_MULTI_UNIQUE = 0,   // discard them (STARsolo's default)
+    SOLO_MULTI_UNIFORM,      // split each molecule evenly across its genes
+    SOLO_MULTI_EM            // distribute in proportion to per-cell abundance
+};
+
 /** How a molecule's splicing state is recorded, for RNA velocity. */
 enum SoloVeloClass {
     SOLO_VELO_SPLICED = 0,
@@ -96,6 +103,19 @@ struct SoloAllelicRec {
     static const uint32_t kAltBit = 0x80000000u;
     uint32_t variant() const { return variantAndAllele & ~kAltBit; }
     bool     isAlt()   const { return (variantAndAllele & kAltBit) != 0; }
+};
+
+/**
+ * A molecule compatible with several genes.
+ *
+ * The gene list lives in a separate flat arena rather than inline, so the
+ * overwhelmingly common single-gene record stays exactly 16 bytes.
+ */
+struct SoloMultiRec {
+    uint32_t cb;
+    uint32_t off;    // start of this record's genes in the arena
+    uint32_t n;      // how many genes
+    uint64_t umi;
 };
 
 struct SoloAmbigRec {
@@ -163,6 +183,8 @@ private:
     std::vector<SoloAmbigRec> ambig_;
     std::vector<SoloAllelicRec> allelic_;
     std::vector<SoloRec> velo_;
+    std::vector<SoloMultiRec> multi_;
+    std::vector<uint32_t> multiGenes_;   // arena for the gene lists
     // Per-thread tallies, summed at finalize.
     uint64_t nReads_ = 0, nValidCB_ = 0, nAmbigCB_ = 0, nNoCB_ = 0;
     uint64_t nUnmapped_ = 0, nNoGene_ = 0, nMultiGene_ = 0, nCounted_ = 0;
@@ -197,6 +219,8 @@ public:
     void setVariantIndex(const SoloVariantIndex* vi) { vi_ = vi; }
     /** Enables spliced/unspliced/ambiguous output. */
     void setVelocyto(bool v) { velocyto_ = v; }
+    void setMultiMapper(SoloMultiMapper m) { multiMode_ = m; }
+    SoloMultiMapper multiMapper() const { return multiMode_; }
     bool velocyto() const { return velocyto_; }
     const SoloVariantIndex* variantIndex() const { return vi_; }
 
@@ -225,6 +249,11 @@ private:
                      std::string& err) const;
     bool writeSummary(std::string& err) const;
     bool writeVelocyto(std::vector<SoloRec>& velo, std::string& err);
+    bool writeMultiMatrix(const std::vector<SoloRec>& counts,
+                          const std::vector<uint32_t>& tally,
+                          std::vector<SoloMultiRec>& multi,
+                          const std::vector<uint32_t>& multiGenes,
+                          std::string& err);
     /** Chooses called barcodes from per-barcode UMI totals. */
     void callCells(const std::vector<SoloRec>& counts,
                    const std::vector<uint32_t>& tally,
@@ -240,6 +269,7 @@ private:
     const SoloParams*    params_;
     const SoloVariantIndex* vi_;
     bool velocyto_ = false;
+    SoloMultiMapper multiMode_ = SOLO_MULTI_UNIQUE;
     GeneFeature feature_;
     GeneStrand  strand_;
     SoloUmiDedup dedup_;
@@ -259,6 +289,7 @@ private:
     uint64_t nRefObs_ = 0, nAltObs_ = 0;
     uint64_t nCalledCells_ = 0, nUMIsInCells_ = 0;
     uint64_t nSpliced_ = 0, nUnspliced_ = 0, nAmbiguous_ = 0;
+    uint64_t nMultiUMIs_ = 0;
 };
 
 #endif /* SOLO_COUNTER_H_ */

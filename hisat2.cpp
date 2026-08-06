@@ -263,6 +263,7 @@ static string soloUmiDedupStr;        // Exact / 1MM_CR / 1MM_All / NoDedup
 static bool   soloAllelic;            // emit per-cell REF/ALT variant matrices
 static string soloCellFilterStr;      // CellRanger2.2 / TopCells / EmptyDrops_CR / None
 static bool   soloVelocyto;           // emit spliced/unspliced/ambiguous matrices
+static string soloMultiStr;           // Unique / Uniform / EM
 static int    soloExpectedCells;      // knee filter: expected cell count
 static int    soloTopCells;           // TopCells: how many to keep
 static string novelSpliceSiteInfile;  //
@@ -520,6 +521,7 @@ static void resetOptions() {
     soloAllelic = false;
     soloCellFilterStr = "CellRanger2.2";
     soloVelocyto = false;
+    soloMultiStr = "Unique";
     soloExpectedCells = 3000;
     soloTopCells = 3000;
     novelSpliceSiteInfile = "";
@@ -772,6 +774,7 @@ static struct option long_options[] = {
     {(char*)"solo-allelic",                 no_argument,       0,        ARG_SOLO_ALLELIC},
     {(char*)"solo-cell-filter",             required_argument, 0,        ARG_SOLO_CELL_FILTER},
     {(char*)"solo-velocyto",                no_argument,       0,        ARG_SOLO_VELOCYTO},
+    {(char*)"solo-multi-mappers",           required_argument, 0,        ARG_SOLO_MULTI},
     {(char*)"solo-expected-cells",          required_argument, 0,        ARG_SOLO_EXPECTED_CELLS},
     {(char*)"solo-top-cells",               required_argument, 0,        ARG_SOLO_TOP_CELLS},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
@@ -1754,6 +1757,7 @@ static void parseOption(int next_option, const char *arg) {
         case ARG_SOLO_ALLELIC: soloAllelic = true; break;
         case ARG_SOLO_CELL_FILTER: soloCellFilterStr = arg; break;
         case ARG_SOLO_VELOCYTO: soloVelocyto = true; break;
+        case ARG_SOLO_MULTI: soloMultiStr = arg; break;
         case ARG_SOLO_EXPECTED_CELLS: soloExpectedCells = parseInt(1, "--solo-expected-cells must be >= 1", arg); break;
         case ARG_SOLO_TOP_CELLS: soloTopCells = parseInt(1, "--solo-top-cells must be >= 1", arg); break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
@@ -4249,6 +4253,14 @@ static void driver(
                 }
                 soloCounter.setCellFilter(cf, soloExpectedCells, 0.99, 10, soloTopCells);
                 soloCounter.setVelocyto(soloVelocyto);
+                SoloMultiMapper mm = SOLO_MULTI_UNIQUE;
+                if(soloMultiStr == "Uniform")   mm = SOLO_MULTI_UNIFORM;
+                else if(soloMultiStr == "EM")   mm = SOLO_MULTI_EM;
+                else if(soloMultiStr != "Unique") {
+                    cerr << "Error: --solo-multi-mappers must be Unique, Uniform or EM" << endl;
+                    throw 1;
+                }
+                soloCounter.setMultiMapper(mm);
                 soloCounter.reserveThreads((size_t)nthreads + 1);
             }
         }
