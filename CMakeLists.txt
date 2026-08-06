@@ -194,6 +194,10 @@ endif()
 
 # Use -iquote (not -I) for the source dir so the VERSION file does not shadow
 # libc++'s <version> header on case-insensitive filesystems (e.g. macOS).
+# The FM-index reads packed data through uint64_t* casts, so strict-aliasing
+# optimisations are not safe here. The Makefile has always passed this; CMake
+# did not, which left the CMake path exposed at -O3.
+add_compile_options(-fno-strict-aliasing)
 add_compile_options("SHELL:-iquote ${PROJECT_SOURCE_DIR}")
 add_definitions(-DCOMPILER_OPTIONS="${CMAKE_CXX_FLAGS}")
 

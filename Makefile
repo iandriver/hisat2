@@ -21,11 +21,13 @@
 #
 
 INC =
-GCC_PREFIX = $(shell dirname `which gcc`)
 GCC_SUFFIX =
-CC = $(GCC_PREFIX)/gcc$(GCC_SUFFIX)
-CPP = $(GCC_PREFIX)/g++$(GCC_SUFFIX)
-CXX = $(CPP)
+# Respect CC/CXX from the environment or command line. Previously these were
+# derived from `dirname $(which gcc)`, which silently produced ./gcc when gcc
+# was absent, and assigned CPP -- which in make means the C preprocessor, not
+# the C++ compiler.
+CC  ?= gcc$(GCC_SUFFIX)
+CXX ?= g++$(GCC_SUFFIX)
 HEADERS = $(wildcard *.h)
 BOWTIE_MM = 1
 BOWTIE_SHARED_MEM = 0
@@ -63,7 +65,8 @@ else
 	ARM = 0
 endif
 
-EXTRA_FLAGS += -std=c++11
+CXXSTD ?= -std=c++11
+EXTRA_FLAGS += $(CXXSTD)
 # Use -iquote . (not -I.) so the VERSION file does not shadow libc++'s
 # <version> header on case-insensitive filesystems (e.g. macOS). Local headers
 # are all included with quotes, so quoted-include search suffices.
@@ -110,7 +113,6 @@ endif
 USE_SRA = 0
 SRA_DEF =
 SRA_LIB =
-SERACH_INC = 
 ifeq (1,$(USE_SRA))
 	SRA_DEF = -DUSE_SRA
 	SRA_LIB = -lncbi-ngs-c++-static -lngs-c++-static -lncbi-vdb-static -ldl
@@ -171,43 +173,46 @@ HISAT2_REPEAT_CPPS_MAIN = $(REPEAT_CPPS) $(BUILD_CPPS) hisat2_repeat_main.cpp
 SEARCH_FRAGMENTS = $(wildcard search_*_phase*.c)
 VERSION = $(shell cat VERSION)
 
-# Convert BITS=?? to a -m flag
-BITS=32
-ifeq (x86_64,$(shell uname -m))
-BITS=64
-endif
-# ARM is 64-bit (aarch64/arm64) and does not take x86 -m32/-m64 flags; the ABI
-# is fixed by the toolchain target, so leave BITS_FLAG empty below.
+# Select the ABI flag from the target architecture. Anything not recognised
+# gets no -m flag: the toolchain's default target is right far more often than
+# a guess, and the previous default of BITS=32 meant every 64-bit platform
+# other than x86_64 and ARM (ppc64le, s390x, riscv64, loongarch64, and FreeBSD,
+# whose uname -m reports amd64) was handed -m32 -msse2 and failed to build.
+UNAME_M ?= $(shell uname -m)
+BITS_FLAG =
+SSE_FLAG =
 ifeq (1,$(ARM))
-BITS=arm
+	# aarch64/arm64: ABI is fixed by the toolchain target; SSE via sse2neon.
+	BITS =arm
+else ifneq (,$(filter $(UNAME_M),x86_64 amd64))
+	BITS =64
+	BITS_FLAG = -m64
+	SSE_FLAG = -msse2
+else ifneq (,$(filter $(UNAME_M),i386 i486 i586 i686))
+	BITS =32
+	BITS_FLAG = -m32
+	SSE_FLAG = -msse2
+else
+	# ppc64le, s390x, riscv64, loongarch64, ... : no x86 flags, no NEON header.
+	BITS =$(UNAME_M)
 endif
-# msys will always be 32 bit so look at the cpu arch instead.
+# msys reports 32-bit even on 64-bit Windows, so consult the CPU instead.
 ifneq (,$(findstring AMD64,$(PROCESSOR_ARCHITEW6432)))
 	ifeq (1,$(MINGW))
-		BITS=64
+		BITS =64
+		BITS_FLAG = -m64
 	endif
-endif
-BITS_FLAG =
-
-ifeq (32,$(BITS))
-	BITS_FLAG = -m32
-endif
-
-ifeq (64,$(BITS))
-	BITS_FLAG = -m64
-endif
-ifeq (1,$(ARM))
-	SSE_FLAG =
-else
-	SSE_FLAG = -msse2
 endif
 
 DEBUG_FLAGS    = -O0 -g3 $(BITS_FLAG) $(SSE_FLAG)
 DEBUG_DEFS     = -DCOMPILER_OPTIONS="\"$(DEBUG_FLAGS) $(EXTRA_FLAGS)\""
-RELEASE_FLAGS  = -O3 $(BITS_FLAG) $(SSE_FLAG) -funroll-loops -g3
+RELEASE_FLAGS  = -O3 $(BITS_FLAG) $(SSE_FLAG) -funroll-loops
 RELEASE_DEFS   = -DCOMPILER_OPTIONS="\"$(RELEASE_FLAGS) $(EXTRA_FLAGS)\""
 NOASSERT_FLAGS = -DNDEBUG
-FILE_FLAGS     = -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
+FILE_FLAGS     = -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
+ifeq (Linux,$(shell uname -s))
+	FILE_FLAGS += -D_GNU_SOURCE
+endif
 
 ifeq (1,$(USE_SRA))
 	ifeq (1, $(MACOS))
@@ -333,7 +338,7 @@ hisat-bp-bin: hisat_bp.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRA
 	$(DEFS) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall \
 	$(INC) \
 	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT_CPPS_MAIN) \
+	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
 	$(LIBS) $(SEARCH_LIBS)
 
 hisat-bp-bin-debug: hisat_bp.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
@@ -342,7 +347,7 @@ hisat-bp-bin-debug: hisat_bp.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEAR
 	$(DEFS) -DBOWTIE2 -Wall \
 	$(INC) \
 	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT_CPPS_MAIN) \
+	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
 	$(LIBS) $(SEARCH_LIBS)
 
 #
