@@ -483,6 +483,9 @@ RefGraph<index_t>::RefGraph(const SString<char>& s,
         assert_gt(nthreads, 0);
         AutoArray<tthread::thread*> threads(nthreads);
         EList<ThreadParam> threadParams;
+        // &threadParams.back() is handed to a thread that starts
+        // immediately; reserving keeps those pointers valid as it fills.
+        threadParams.reserveExact((size_t)nthreads);
         for(index_t i = 0; i < (index_t)nthreads; i++) {
             threadParams.expand();
             threadParams.back().thread_id = i;

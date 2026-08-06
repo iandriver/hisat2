@@ -789,6 +789,10 @@ void DifferenceCoverSample<TStr>::build(int nthreads) {
                 if(boundaries.size() > 0) {
                     AutoArray<tthread::thread*> threads(nthreads);
                     EList<VSortingParam<TStr> > tparams;
+                    // Reserve up front: expand() reallocates, and these loops hand &list.back()
+                    // to a thread that starts immediately, so a later growth would leave
+                    // already-running threads dereferencing freed memory.
+                    tparams.reserveExact(nthreads);
                     size_t cur = 0;
                     MUTEX_T mutex;
                     for(int tid = 0; tid < nthreads; tid++) {

@@ -273,6 +273,10 @@ public:
                 _done.resize(_sampleSuffs.size() + 1);
                 _done.fill(false);
                 _itrBuckets.resize(this->_nthreads);
+                // Reserve up front: expand() reallocates, and these loops hand &list.back()
+                // to a thread that starts immediately, so a later growth would leave
+                // already-running threads dereferencing freed memory.
+                _tparams.reserveExact(this->_nthreads);
                 for(int tid = 0; tid < this->_nthreads; tid++) {
                     _tparams.expand();
                     _tparams.back().first = this;
@@ -607,6 +611,9 @@ void KarkkainenBlockwiseSA<TStr>::buildSamples() {
         TIndexOffU numBuckets = (TIndexOffU)_sampleSuffs.size()+1;
         AutoArray<tthread::thread*> threads(this->_nthreads);
         EList<BinarySortingParam<TStr> > tparams;
+        // See the note above: &tparams.back() is handed to a thread that
+        // starts immediately, so the list must not grow afterwards.
+        tparams.reserveExact((size_t)this->_nthreads);
         for(int tid = 0; tid < this->_nthreads; tid++) {
             // Calculate bucket sizes by doing a binary search for each
             // suffix and noting where it lands
