@@ -21,6 +21,7 @@
 #define BLOCKWISE_SA_H_
 
 #include <stdint.h>
+#include "threading.h"
 #include <stdlib.h>
 #include <iostream>
 #include <sstream>
@@ -302,12 +303,7 @@ public:
                 _cur++;
             } else {
                 while(!_done[this->_itrBucketIdx]) {
-#if defined(_TTHREAD_WIN32_)
-                    Sleep(1);
-#elif defined(_TTHREAD_POSIX_)
-                    const static timespec ts = {0, 1000000};  // 1 millisecond
-                    nanosleep(&ts, NULL);
-#endif
+                    threadSleepMs(1);
                 }
                 // Read suffixes from a file
                 std::ostringstream number; number << this->_itrBucketIdx;

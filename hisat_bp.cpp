@@ -2965,11 +2965,7 @@ static void multiseedSearchWorker_hisat_bp(void *vp) {
                 }
                 
                 if(min_rdid + thread_rids_mindist < rdid) {
-#if defined(_TTHREAD_WIN32_)
-                    Sleep(0);
-#elif defined(_TTHREAD_POSIX_)
-                    sched_yield();
-#endif
+                    threadYield();
                 } else break;
             }
         }
