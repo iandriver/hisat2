@@ -31,7 +31,10 @@ A few notes:
 5) Use [HISAT-3N](https://daehwankimlab.github.io/hisat2/hisat-3n/) to align nucleotide converted sequencing reads
    include [BS-seq], [SLAM-seq], [scBS-seq], [scSLAM-seq], [TAB-seq], [oxBS-seq], [TAPS] and [EM-seq].
    This alignment process requires about 10 GB of RAM.
-6) HISAT2 repository is seperated with HISAT-genotype repository.
+6) Single-cell (10x) quantification is available in-aligner: barcode/UMI handling,
+   cell x gene matrices, RNA velocity, and variant-aware allele-specific counts.
+   See [README_SOLO.md](README_SOLO.md).
+7) HISAT2 repository is seperated with HISAT-genotype repository.
    Please see the link below for [HISAT-genotype repository](https://github.com/DaehwanKimLab/hisat-genotype)
    and [HISAT-genotype homepage](https://daehwankimlab.github.io/hisat-genotype/).
 
