@@ -1515,7 +1515,7 @@ static void parseOptions(int argc, const char **argv) {
 	}
 	// Now parse all the presets.  Might want to pick which presets version to
 	// use according to other parameters.
-	auto_ptr<Presets> presets(new PresetsV0());
+	unique_ptr<Presets> presets(new PresetsV0());
 	// Apply default preset
 	if(!defaultPreset.empty()) {
 		polstr = applyPreset(defaultPreset, *presets.get()) + polstr;
@@ -2830,8 +2830,8 @@ static void multiseedSearchWorker_hisat_bp(void *vp) {
 	// problems, or generally characterize performance.
 	
 	//const BitPairReference& refs   = *multiseed_refs;
-	auto_ptr<PatternSourcePerThreadFactory> patsrcFact(createPatsrcFactory(patsrc, tid));
-	auto_ptr<PatternSourcePerThread> ps(patsrcFact->create());
+	unique_ptr<PatternSourcePerThreadFactory> patsrcFact(createPatsrcFactory(patsrc, tid));
+	unique_ptr<PatternSourcePerThread> ps(patsrcFact->create());
 	
 	// Thread-local cache for seed alignments
 	PtrWrap<AlignmentCache<index_t> > scLocal;
@@ -2857,7 +2857,7 @@ static void multiseedSearchWorker_hisat_bp(void *vp) {
                        gReportMixed);     // report unpaired alignments for paired reads?
     
 	// Instantiate a mapping quality calculator
-	auto_ptr<Mapq> bmapq(new_mapq(mapqv, scoreMin, sc));
+	unique_ptr<Mapq> bmapq(new_mapq(mapqv, scoreMin, sc));
 	
 	// Make a per-thread wrapper for the global MHitSink object.
 	AlnSinkWrap<index_t> msinkwrap(
@@ -3613,7 +3613,7 @@ static void driver(
 		// memory so that we can easily sanity check them later on
 		AlnSink<index_t> *mssink = NULL;
         Timer *_tRef = new Timer(cerr, "Time loading reference: ", timing);
-        auto_ptr<BitPairReference> refs(
+        unique_ptr<BitPairReference> refs(
                                         new BitPairReference(
                                                              adjIdxBase,
                                                              false,

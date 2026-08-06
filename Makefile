@@ -65,7 +65,7 @@ else
 	ARM = 0
 endif
 
-CXXSTD ?= -std=c++11
+CXXSTD ?= -std=c++17
 EXTRA_FLAGS += $(CXXSTD)
 # Use -iquote . (not -I.) so the VERSION file does not shadow libc++'s
 # <version> header on case-insensitive filesystems (e.g. macOS). Local headers
