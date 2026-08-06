@@ -24,14 +24,9 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include "tinythread.h"
-#include "fast_mutex.h"
+#include <mutex>
 
-#ifdef NO_SPINLOCK
-#   define MUTEX_T tthread::mutex
-#else
-#  	define MUTEX_T tthread::fast_mutex
-#endif /* NO_SPINLOCK */
+#define MUTEX_T std::mutex
 
 /**
  * Pause inside a spin-wait loop.

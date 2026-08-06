@@ -18,6 +18,7 @@
  */
 
 #include <stdlib.h>
+#include <thread>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -3327,7 +3328,7 @@ static void multiseedSearch(
     multiseed_refnames = refnames;
 	multiseed_metricsOfb      = metricsOfb;
 	multiseed_refs = refs;
-	AutoArray<tthread::thread*> threads(nthreads);
+	AutoArray<std::thread*> threads(nthreads);
 	AutoArray<int> tids(nthreads);
 	{
 		// Load the other half of the index into memory
@@ -3370,7 +3371,7 @@ static void multiseedSearch(
 		for(int i = 0; i < nthreads; i++) {
 			// Thread IDs start at 1
 			tids[i] = i+1;
-            threads[i] = new tthread::thread(multiseedSearchWorker_hisat_bp, (void*)&tids[i]);
+            threads[i] = new std::thread(multiseedSearchWorker_hisat_bp, (void*)&tids[i]);
 		}
 
         for (int i = 0; i < nthreads; i++)

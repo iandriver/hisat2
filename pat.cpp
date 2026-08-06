@@ -18,6 +18,7 @@
  */
 
 #include <cmath>
+#include <thread>
 #include "threading.h"
 #include <iostream>
 #include <string>
@@ -30,7 +31,6 @@
 
 #ifdef USE_SRA
 
-#include "tinythread.h"
 #include <ncbi-vdb/NGS.hpp>
 #include <ngs/ErrorMsg.hpp>
 #include <ngs/ReadCollection.hpp>
@@ -1770,7 +1770,7 @@ void SRAPatternSource::open() {
             sra_data_->paired_reads.resize(sra_data_->buffer_size);
             
             // create a thread for handling SRA data access
-            io_thread_ = new tthread::thread(SRA_IO_Worker, (void*)sra_data_);
+            io_thread_ = new std::thread(SRA_IO_Worker, (void*)sra_data_);
             // io_thread_->join();
         } catch(...) {
             if(!errs_[sra_acc_cur_]) {

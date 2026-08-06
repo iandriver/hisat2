@@ -151,7 +151,7 @@ _empty(true)
         _bwIndex.push_back(new RedBlack<SpliceSitePos, uint32_t>(16 << 10, CA_CAT));
         _pool.expand();
         _spliceSites.expand();
-        _mutex.push_back(MUTEX_T());
+        _mutex.emplace_back();
     }
     
     donorstr.resize(donor_exonic_len + donor_intronic_len);

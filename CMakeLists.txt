@@ -75,7 +75,6 @@ set(SHARED_CPPS
 	reference.cpp
 	ref_read.cpp
 	shmem.cpp
-	tinythread.cpp
 	)
 
 set(SEARCH_CPPS

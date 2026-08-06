@@ -21,6 +21,7 @@
 #define GBWT_GRAPH_H_
 
 #include <string>
+#include <thread>
 #include <stdexcept>
 #include <iostream>
 #include <fstream>
@@ -481,7 +482,7 @@ RefGraph<index_t>::RefGraph(const SString<char>& s,
             nthreads = (int)tmp_szs.size();
         }
         assert_gt(nthreads, 0);
-        AutoArray<tthread::thread*> threads(nthreads);
+        AutoArray<std::thread*> threads(nthreads);
         EList<ThreadParam> threadParams;
         // &threadParams.back() is handed to a thread that starts
         // immediately; reserving keeps those pointers valid as it fills.
@@ -502,7 +503,7 @@ RefGraph<index_t>::RefGraph(const SString<char>& s,
             if(nthreads == 1) {
                 buildGraph_worker((void*)&threadParams.back());
             } else {
-                threads[i] = new tthread::thread(buildGraph_worker, (void*)&threadParams.back());
+                threads[i] = new std::thread(buildGraph_worker, (void*)&threadParams.back());
             }
         }
 
@@ -2082,7 +2083,7 @@ void PathGraph<index_t>::createNewNodesMaker(void* vp) {
 template <typename index_t>
 void PathGraph<index_t>::createNewNodes() {
     time_t indiv = time(0);
-    AutoArray<tthread::thread*> threads(nthreads);
+    AutoArray<std::thread*> threads(nthreads);
     EList<CreateNewNodesParams> params; params.resizeExact(nthreads);
     EList<index_t> sub_temp_nodes; sub_temp_nodes.resizeExact(nthreads); sub_temp_nodes.fillZero();
     PathNode* st = past_nodes.begin();
@@ -2095,7 +2096,7 @@ void PathGraph<index_t>::createNewNodes() {
         if(nthreads == 1) {
             createNewNodesCounter((void*)&params[0]);
         } else {
-            threads[i] = new tthread::thread(&createNewNodesCounter, (void*)&params[i]);
+            threads[i] = new std::thread(&createNewNodesCounter, (void*)&params[i]);
         }
         st = en;
         if(i + 2 == nthreads) {
@@ -2139,7 +2140,7 @@ void PathGraph<index_t>::createNewNodes() {
         if(nthreads == 1) {
             createNewNodesMaker((void*)&params[0]);
         } else {
-            threads[i] = new tthread::thread(&createNewNodesMaker, (void*)&params[i]);
+            threads[i] = new std::thread(&createNewNodesMaker, (void*)&params[i]);
         }
     }
 
@@ -2411,7 +2412,7 @@ bool PathGraph<index_t>::generateEdges(RefGraph<index_t>& base)
     // fast because base.edges roughly sorted by to
 
     //count number of edges
-    AutoArray<tthread::thread*> threads(nthreads);
+    AutoArray<std::thread*> threads(nthreads);
     EList<GenEdgesParams> params; params.resizeExact(nthreads);
     ELList<index_t, 6> label_index; label_index.resize(nthreads);
     typename RefGraph<index_t>::Edge* st = base.edges.begin();
@@ -2428,7 +2429,7 @@ bool PathGraph<index_t>::generateEdges(RefGraph<index_t>& base)
         if(nthreads == 1) {
             generateEdgesCounter((void*)&params[0]);
         } else {
-            threads[i] = new tthread::thread(&generateEdgesCounter, (void*)&params[i]);
+            threads[i] = new std::thread(&generateEdgesCounter, (void*)&params[i]);
         }
         st = en;
         if(i + 2 == nthreads) {
@@ -2464,7 +2465,7 @@ bool PathGraph<index_t>::generateEdges(RefGraph<index_t>& base)
         if(nthreads == 1) {
             generateEdgesMaker((void*)&params[0]);
         } else {
-            threads[i] = new tthread::thread(&generateEdgesMaker, (void*)&params[i]);
+            threads[i] = new std::thread(&generateEdgesMaker, (void*)&params[i]);
         }
     }
 

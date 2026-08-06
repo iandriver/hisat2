@@ -21,6 +21,7 @@
 #define DIFF_SAMPLE_H_
 
 #include <stdint.h>
+#include <thread>
 #include <string.h>
 #include "assert_helpers.h"
 #include "multikey_qsort.h"
@@ -787,7 +788,7 @@ void DifferenceCoverSample<TStr>::build(int nthreads) {
                 mkeyQSortSuf2(t, sPrimeArr, sPrimeSz, sPrimeOrderArr, 4,
                               this->verbose(), false, query_depth, &boundaries);
                 if(boundaries.size() > 0) {
-                    AutoArray<tthread::thread*> threads(nthreads);
+                    AutoArray<std::thread*> threads(nthreads);
                     EList<VSortingParam<TStr> > tparams;
                     // Reserve up front: expand() reallocates, and these loops hand &list.back()
                     // to a thread that starts immediately, so a later growth would leave
@@ -807,7 +808,7 @@ void DifferenceCoverSample<TStr>::build(int nthreads) {
                         tparams.back().boundaries = &boundaries;
                         tparams.back().cur = &cur;
                         tparams.back().mutex = &mutex;
-                        threads[tid] = new tthread::thread(VSorting_worker<TStr>, (void*)&tparams.back());
+                        threads[tid] = new std::thread(VSorting_worker<TStr>, (void*)&tparams.back());
                     }
                     for (int tid = 0; tid < nthreads; tid++) {
                         threads[tid]->join();

@@ -21,6 +21,7 @@
 #define HGFM_H_
 
 #include "hier_idx_common.h"
+#include <thread>
 #include "threading.h"
 #include "gfm.h"
 
@@ -2190,7 +2191,7 @@ HGFM<index_t, local_index_t>::HGFM(
     
     if(localIndex) {
         assert_gt(this->_nthreads, 0);
-        AutoArray<tthread::thread*> threads(this->_nthreads - 1);
+        AutoArray<std::thread*> threads(this->_nthreads - 1);
         EList<ThreadParam> tParams; tParams.reserveExact((size_t)this->_nthreads);
         for(index_t t = 0; t < (index_t)this->_nthreads; t++) {
             tParams.expand();
@@ -2204,7 +2205,7 @@ HGFM<index_t, local_index_t>::HGFM(
             tParams.back().seed = seed;
             if(t + 1 < (index_t)this->_nthreads) {
                 tParams.back().mainThread = false;
-                threads[t] = new tthread::thread(gbwt_worker, (void*)&tParams.back());
+                threads[t] = new std::thread(gbwt_worker, (void*)&tParams.back());
             } else {
                 tParams.back().mainThread = true;
             }

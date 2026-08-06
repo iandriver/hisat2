@@ -125,7 +125,7 @@ LIBS = $(PTHREAD_LIB)
 SHARED_CPPS = ccnt_lut.cpp ref_read.cpp alphabet.cpp shmem.cpp \
 	edit.cpp gfm.cpp \
 	reference.cpp ds.cpp multikey_qsort.cpp limit.cpp \
-	random_source.cpp tinythread.cpp
+	random_source.cpp
 SEARCH_CPPS = qual.cpp pat.cpp \
 	read_qseq.cpp aligner_seed_policy.cpp \
 	aligner_seed.cpp \
