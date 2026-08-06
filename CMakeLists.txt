@@ -170,7 +170,9 @@ add_definitions(
 
 if(HISAT2_ARM)
 	# ARM: vendored sse2neon.h (quoted include); no POPCNT, no x86 <cpuid.h>.
-	add_compile_options(-iquote ${PROJECT_SOURCE_DIR}/third_party)
+	# SHELL: keeps the flag and its argument together; without it CMake
+	# de-duplicates the repeated -iquote token and the second path is left bare.
+	add_compile_options("SHELL:-iquote ${PROJECT_SOURCE_DIR}/third_party")
 else()
 	# x86: POPCNT path + vendored <cpuid.h>.
 	add_definitions(-DPOPCNT_CAPABILITY)
@@ -192,7 +194,7 @@ endif()
 
 # Use -iquote (not -I) for the source dir so the VERSION file does not shadow
 # libc++'s <version> header on case-insensitive filesystems (e.g. macOS).
-add_compile_options(-iquote ${PROJECT_SOURCE_DIR})
+add_compile_options("SHELL:-iquote ${PROJECT_SOURCE_DIR}")
 add_definitions(-DCOMPILER_OPTIONS="${CMAKE_CXX_FLAGS}")
 
 add_library(hisat2lib_static STATIC ${HT2LIB_CPPS} ${SHARED_CPPS})
