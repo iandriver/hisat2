@@ -262,6 +262,7 @@ static string soloOutDir;             // Solo.out directory; enables counting
 static string soloUmiDedupStr;        // Exact / 1MM_CR / 1MM_All / NoDedup
 static bool   soloAllelic;            // emit per-cell REF/ALT variant matrices
 static string soloCellFilterStr;      // CellRanger2.2 / TopCells / EmptyDrops_CR / None
+static bool   soloVelocyto;           // emit spliced/unspliced/ambiguous matrices
 static int    soloExpectedCells;      // knee filter: expected cell count
 static int    soloTopCells;           // TopCells: how many to keep
 static string novelSpliceSiteInfile;  //
@@ -518,6 +519,7 @@ static void resetOptions() {
     soloUmiDedupStr = "1MM_CR";
     soloAllelic = false;
     soloCellFilterStr = "CellRanger2.2";
+    soloVelocyto = false;
     soloExpectedCells = 3000;
     soloTopCells = 3000;
     novelSpliceSiteInfile = "";
@@ -769,6 +771,7 @@ static struct option long_options[] = {
     {(char*)"solo-umi-dedup",               required_argument, 0,        ARG_SOLO_UMI_DEDUP},
     {(char*)"solo-allelic",                 no_argument,       0,        ARG_SOLO_ALLELIC},
     {(char*)"solo-cell-filter",             required_argument, 0,        ARG_SOLO_CELL_FILTER},
+    {(char*)"solo-velocyto",                no_argument,       0,        ARG_SOLO_VELOCYTO},
     {(char*)"solo-expected-cells",          required_argument, 0,        ARG_SOLO_EXPECTED_CELLS},
     {(char*)"solo-top-cells",               required_argument, 0,        ARG_SOLO_TOP_CELLS},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
@@ -1750,6 +1753,7 @@ static void parseOption(int next_option, const char *arg) {
         case ARG_SOLO_UMI_DEDUP: soloUmiDedupStr = arg; break;
         case ARG_SOLO_ALLELIC: soloAllelic = true; break;
         case ARG_SOLO_CELL_FILTER: soloCellFilterStr = arg; break;
+        case ARG_SOLO_VELOCYTO: soloVelocyto = true; break;
         case ARG_SOLO_EXPECTED_CELLS: soloExpectedCells = parseInt(1, "--solo-expected-cells must be >= 1", arg); break;
         case ARG_SOLO_TOP_CELLS: soloTopCells = parseInt(1, "--solo-top-cells must be >= 1", arg); break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
@@ -4244,6 +4248,7 @@ static void driver(
                     throw 1;
                 }
                 soloCounter.setCellFilter(cf, soloExpectedCells, 0.99, 10, soloTopCells);
+                soloCounter.setVelocyto(soloVelocyto);
                 soloCounter.reserveThreads((size_t)nthreads + 1);
             }
         }

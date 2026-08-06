@@ -163,9 +163,10 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     // agree on one gene the read is unique-gene even when it is multi-locus,
     // which is what STARsolo counts by default.
     static thread_local std::vector<uint32_t> genes, scratch, blockGenes;
+    static thread_local std::vector<uint32_t> bodyGenes, veloGenes, veloClasses;
     static thread_local std::vector<std::pair<int64_t, int64_t> > blocks;
     static thread_local StackedAln staln;
-    genes.clear();
+    genes.clear(); veloGenes.clear(); veloClasses.clear();
 
     for(size_t i = 0; i < nresults; i++) {
         const AlnRes& rs = (*results)[i];
@@ -202,6 +203,33 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         p->geneModel()->assignGenes((int32_t)rs.refid(), blocks, rs.fw(),
                                     p->feature(), p->strand(), blockGenes, scratch);
         for(size_t g = 0; g < blockGenes.size(); g++) genes.push_back(blockGenes[g]);
+
+        // Velocyto works off the gene body, not the exon union: an intronic
+        // read is exactly the signal of interest, and the exonic assignment
+        // would discard it.
+        if(p->velocyto()) {
+            bodyGenes.clear();
+            p->geneModel()->assignGenes((int32_t)rs.refid(), blocks, rs.fw(),
+                                        GENE_FEATURE_BODY, p->strand(), bodyGenes, scratch);
+            const GeneModel* gm = p->geneModel();
+            for(size_t bg = 0; bg < bodyGenes.size(); bg++) {
+                uint32_t g = bodyGenes[bg];
+                bool intronic = false, splicedJn = false;
+                for(size_t b = 0; b < blocks.size(); b++) {
+                    // A block not contained in a single exon either lies in an
+                    // intron or straddles a boundary; both are unspliced evidence.
+                    if(!gm->blockInExonsOf(g, blocks[b].first, blocks[b].second)) intronic = true;
+                    if(b + 1 < blocks.size() &&
+                       gm->junctionInGene(g, blocks[b].second - 1, blocks[b + 1].first)) {
+                        splicedJn = true;
+                    }
+                }
+                uint32_t cls = intronic ? (splicedJn ? SOLO_VELO_AMBIGUOUS : SOLO_VELO_UNSPLICED)
+                                        : SOLO_VELO_SPLICED;
+                veloGenes.push_back(g);
+                veloClasses.push_back(cls);
+            }
+        }
     }
 
     // Allele observations.  A read that took an alternate path through the
@@ -239,8 +267,31 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     std::sort(genes.begin(), genes.end());
     genes.erase(std::unique(genes.begin(), genes.end()), genes.end());
 
+    if(p->velocyto() && !veloGenes.empty() && sr.corrected()) {
+        // Collapse across alignments: a molecule showing both intronic and
+        // spliced evidence is ambiguous, matching how the per-UMI merge below
+        // resolves multiple reads.
+        uint32_t g0 = veloGenes[0];
+        bool single = true, anyUnspliced = false, anySpliced = false;
+        for(size_t k = 0; k < veloGenes.size(); k++) {
+            if(veloGenes[k] != g0) { single = false; break; }
+            if(veloClasses[k] == SOLO_VELO_UNSPLICED) anyUnspliced = true;
+            else if(veloClasses[k] == SOLO_VELO_SPLICED) anySpliced = true;
+            else { anyUnspliced = true; anySpliced = true; }
+        }
+        if(single) {
+            SoloRec vr;
+            vr.cb = sr.cbIdx;
+            vr.geneAndFlags = g0;
+            vr.umi = sr.umiPacked;
+            vr.setVeloClass(anyUnspliced && anySpliced ? SOLO_VELO_AMBIGUOUS
+                            : (anyUnspliced ? SOLO_VELO_UNSPLICED : SOLO_VELO_SPLICED));
+            velo_.push_back(vr);
+        }
+    }
+
     if(genes.empty())      { nNoGene_++;    return; }
-    if(genes.size() > 1)   { nMultiGene_++; return; }   // EM handling is F6
+    if(genes.size() > 1)   { nMultiGene_++; return; }   // EM handling is F7
 
     nCounted_++;
     if(sr.status == SOLO_CB_AMBIG) {
@@ -264,6 +315,7 @@ bool SoloCounter::finalize(std::string& err) {
     std::vector<SoloRec> all;
     std::vector<SoloAmbigRec> ambig;
     std::vector<SoloAllelicRec> allelic;
+    std::vector<SoloRec> velo;
     size_t total = 0;
     for(size_t i = 0; i < threads_.size(); i++) total += threads_[i]->recs_.size();
     all.reserve(total);
@@ -272,6 +324,7 @@ bool SoloCounter::finalize(std::string& err) {
         all.insert(all.end(), t->recs_.begin(), t->recs_.end());
         ambig.insert(ambig.end(), t->ambig_.begin(), t->ambig_.end());
         allelic.insert(allelic.end(), t->allelic_.begin(), t->allelic_.end());
+        velo.insert(velo.end(), t->velo_.begin(), t->velo_.end());
         nRefObs_ += t->nRefObs_; nAltObs_ += t->nAltObs_;
         nReads_ += t->nReads_; nValidCB_ += t->nValidCB_; nAmbigCB_ += t->nAmbigCB_;
         nNoCB_ += t->nNoCB_;   nUnmapped_ += t->nUnmapped_;
@@ -281,6 +334,7 @@ bool SoloCounter::finalize(std::string& err) {
         std::vector<SoloRec>().swap(t->recs_);
         std::vector<SoloAmbigRec>().swap(t->ambig_);
         std::vector<SoloAllelicRec>().swap(t->allelic_);
+        std::vector<SoloRec>().swap(t->velo_);
     }
 
     // Ambiguous barcodes: now that the pass is complete, the exact-match count
@@ -467,6 +521,7 @@ bool SoloCounter::finalize(std::string& err) {
         }
     }
 
+    if(!velo.empty() && !writeVelocyto(velo, err)) return false;
     if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
     if(!writeSummary(err)) return false;
     return true;
@@ -558,6 +613,80 @@ bool SoloCounter::writeFiltered(const std::vector<SoloRec>& counts,
             uint32_t c = colOf[counts[k].cb];
             if(c == 0xffffffffu) continue;
             o << (counts[k].gene() + 1) << " " << (c + 1) << " " << tally[k] << "\n";
+        }
+    }
+    return true;
+}
+
+bool SoloCounter::writeVelocyto(std::vector<SoloRec>& velo, std::string& err) {
+    // Collapse to one class per molecule. STARsolo's rule: a UMI is spliced
+    // only if every read supporting it is spliced, unspliced only if every
+    // read is unspliced, and ambiguous otherwise.
+    std::sort(velo.begin(), velo.end(),
+              [](const SoloRec& a, const SoloRec& b) {
+                  if(a.cb != b.cb) return a.cb < b.cb;
+                  if(a.gene() != b.gene()) return a.gene() < b.gene();
+                  return a.umi < b.umi;
+              });
+
+    std::vector<SoloRec> keys;
+    std::vector<uint32_t> nS, nU, nA;
+    size_t i = 0;
+    while(i < velo.size()) {
+        size_t j = i;
+        while(j < velo.size() && velo[j].cb == velo[i].cb && velo[j].gene() == velo[i].gene()) j++;
+        uint32_t cS = 0, cU = 0, cA = 0;
+        for(size_t k = i; k < j; ) {
+            size_t m = k;
+            bool anyS = false, anyU = false, anyA = false;
+            while(m < j && velo[m].umi == velo[k].umi) {
+                uint32_t c = velo[m].veloClass();
+                if(c == SOLO_VELO_SPLICED) anyS = true;
+                else if(c == SOLO_VELO_UNSPLICED) anyU = true;
+                else anyA = true;
+                m++;
+            }
+            if(anyA || (anyS && anyU)) cA++;
+            else if(anyU) cU++;
+            else cS++;
+            k = m;
+        }
+        SoloRec r = velo[i];
+        keys.push_back(r); nS.push_back(cS); nU.push_back(cU); nA.push_back(cA);
+        nSpliced_ += cS; nUnspliced_ += cU; nAmbiguous_ += cA;
+        i = j;
+    }
+
+    std::string raw = outDir_ + "/Velocyto/raw";
+    if(!makeDirs(raw)) { err = "could not create output directory: " + raw; return false; }
+    {
+        std::ofstream o((raw + "/features.tsv").c_str());
+        if(!o.good()) { err = "could not write Velocyto features.tsv"; return false; }
+        for(size_t g = 0; g < gm_->numGenes(); g++)
+            o << gm_->geneId(g) << "\t" << gm_->geneName(g) << "\tGene Expression\n";
+    }
+    {
+        std::ofstream o((raw + "/barcodes.tsv").c_str());
+        if(!o.good()) { err = "could not write Velocyto barcodes.tsv"; return false; }
+        char buf[40];
+        for(size_t b = 0; b < wl_->size(); b++) {
+            soloUnpack(wl_->codeAt((uint32_t)b), wl_->cbLen(), buf);
+            o << buf << "\n";
+        }
+    }
+    const char* fname[3] = { "spliced.mtx", "unspliced.mtx", "ambiguous.mtx" };
+    const std::vector<uint32_t>* vecs[3] = { &nS, &nU, &nA };
+    for(int a = 0; a < 3; a++) {
+        const std::vector<uint32_t>& N = *vecs[a];
+        size_t nz = 0;
+        for(size_t k = 0; k < N.size(); k++) if(N[k] > 0) nz++;
+        std::ofstream o((raw + "/" + fname[a]).c_str());
+        if(!o.good()) { err = std::string("could not write ") + fname[a]; return false; }
+        o << "%%MatrixMarket matrix coordinate integer general\n%\n";
+        o << gm_->numGenes() << " " << wl_->size() << " " << nz << "\n";
+        for(size_t k = 0; k < N.size(); k++) {
+            if(N[k] == 0) continue;
+            o << (keys[k].gene() + 1) << " " << (keys[k].cb + 1) << " " << N[k] << "\n";
         }
     }
     return true;
@@ -705,6 +834,11 @@ bool SoloCounter::writeSummary(std::string& err) const {
     o << "Barcodes With UMIs," << nCells_ << "\n";
     o << "Total Genes Detected," << nGenesDetected_ << "\n";
     o << "Total UMIs," << nUMIs_ << "\n";
+    if(velocyto_) {
+        o << "Velocyto Spliced," << nSpliced_ << "\n";
+        o << "Velocyto Unspliced," << nUnspliced_ << "\n";
+        o << "Velocyto Ambiguous," << nAmbiguous_ << "\n";
+    }
     if(filter_ != SOLO_FILTER_NONE) {
         o << "Estimated Number of Cells," << nCalledCells_ << "\n";
         o << "UMIs in Cells," << nUMIsInCells_ << "\n";

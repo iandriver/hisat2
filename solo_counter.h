@@ -39,6 +39,13 @@ enum SoloCellFilter {
     SOLO_FILTER_EMPTYDROPS      // deferred to hisat2_solo_filter.py
 };
 
+/** How a molecule's splicing state is recorded, for RNA velocity. */
+enum SoloVeloClass {
+    SOLO_VELO_SPLICED = 0,
+    SOLO_VELO_UNSPLICED = 1,
+    SOLO_VELO_AMBIGUOUS = 2
+};
+
 /** UMI collapsing rule. Names match STARsolo so results are comparable. */
 enum SoloUmiDedup {
     SOLO_UMI_EXACT = 0,   // distinct UMI sequences
@@ -59,7 +66,15 @@ struct SoloRec {
     uint32_t geneAndFlags;   // gene index in the low 28 bits
     uint64_t umi;            // 2-bit packed
 
-    static const uint32_t kGeneMask = 0x0fffffffu;
+    // Velocyto class lives in the two bits above the gene index.
+    static const uint32_t kGeneMask  = 0x0fffffffu;
+    static const uint32_t kVeloShift = 28;
+    static const uint32_t kVeloMask  = 0x30000000u;
+    uint32_t veloClass() const { return (geneAndFlags & kVeloMask) >> kVeloShift; }
+    void setVeloClass(uint32_t c) {
+        geneAndFlags = (geneAndFlags & ~kVeloMask) | ((c << kVeloShift) & kVeloMask);
+    }
+
     uint32_t gene() const { return geneAndFlags & kGeneMask; }
     void setGene(uint32_t g) { geneAndFlags = (geneAndFlags & ~kGeneMask) | (g & kGeneMask); }
 };
@@ -147,6 +162,7 @@ private:
     std::vector<SoloRec>      recs_;
     std::vector<SoloAmbigRec> ambig_;
     std::vector<SoloAllelicRec> allelic_;
+    std::vector<SoloRec> velo_;
     // Per-thread tallies, summed at finalize.
     uint64_t nReads_ = 0, nValidCB_ = 0, nAmbigCB_ = 0, nNoCB_ = 0;
     uint64_t nUnmapped_ = 0, nNoGene_ = 0, nMultiGene_ = 0, nCounted_ = 0;
@@ -179,6 +195,9 @@ public:
 
     /** Enables allelic output. The index must outlive the counter. */
     void setVariantIndex(const SoloVariantIndex* vi) { vi_ = vi; }
+    /** Enables spliced/unspliced/ambiguous output. */
+    void setVelocyto(bool v) { velocyto_ = v; }
+    bool velocyto() const { return velocyto_; }
     const SoloVariantIndex* variantIndex() const { return vi_; }
 
     bool enabled() const { return gm_ != NULL && wl_ != NULL; }
@@ -205,6 +224,7 @@ private:
                      const std::vector<uint32_t>& tally,
                      std::string& err) const;
     bool writeSummary(std::string& err) const;
+    bool writeVelocyto(std::vector<SoloRec>& velo, std::string& err);
     /** Chooses called barcodes from per-barcode UMI totals. */
     void callCells(const std::vector<SoloRec>& counts,
                    const std::vector<uint32_t>& tally,
@@ -219,6 +239,7 @@ private:
     const SoloWhitelist* wl_;
     const SoloParams*    params_;
     const SoloVariantIndex* vi_;
+    bool velocyto_ = false;
     GeneFeature feature_;
     GeneStrand  strand_;
     SoloUmiDedup dedup_;
@@ -237,6 +258,7 @@ private:
     uint64_t nRefUMIs_ = 0, nAltUMIs_ = 0, nVariantsSeen_ = 0;
     uint64_t nRefObs_ = 0, nAltObs_ = 0;
     uint64_t nCalledCells_ = 0, nUMIsInCells_ = 0;
+    uint64_t nSpliced_ = 0, nUnspliced_ = 0, nAmbiguous_ = 0;
 };
 
 #endif /* SOLO_COUNTER_H_ */
