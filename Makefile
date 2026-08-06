@@ -330,160 +330,61 @@ DEFS=-fno-strict-aliasing \
      $(SHMEM_DEF)
 
 #
-# hisat-bp targets
+# Binary targets.
 #
-
-hisat-bp-bin: hisat_bp.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
-	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
-	$(LIBS) $(SEARCH_LIBS)
-
-hisat-bp-bin-debug: hisat_bp.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
-	$(CXX) $(DEBUG_FLAGS) \
-	$(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
-	$(LIBS) $(SEARCH_LIBS)
-
+# Each binary is compiled into its own object directory, because they differ in
+# preprocessor defines -- index width (-DBOWTIE_64BIT_INDEX), assertions, and
+# optimisation level -- so objects cannot be shared between them. Previously
+# every target recompiled the whole source set in a single compiler invocation,
+# so `make -j` parallelised across the seven links only and duplicated the
+# compilation work sevenfold, and any edit meant a full rebuild.
 #
-# hisat2-repeat targets
+# -MMD -MP emits a .d alongside each .o so header edits trigger exactly the
+# recompiles they should.
 #
+# $(1) target   $(2) sources   $(3) build flags   $(4) defs   $(5) extra inc   $(6) extra libs
+define BUILD_TARGET
+$(1)_OBJDIR := .obj/$(1)
+$(1)_OBJS   := $$(addprefix .obj/$(1)/,$$(patsubst %.cpp,%.o,$(2)))
 
-hisat2-repeat: hisat2_repeat.cpp $(REPEAT_CPPS) $(SHARED_CPPS) $(HEADERS)
-	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DBOWTIE_64BIT_INDEX $(NOASSERT_FLAGS) -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_REPEAT_CPPS_MAIN) \
-	$(LIBS) $(BUILD_LIBS)
+.obj/$(1)/%.o: %.cpp
+	@mkdir -p $$(@D)
+	$$(CXX) $(3) $$(EXTRA_FLAGS) $$(DEFS) $(4) -Wall -MMD -MP $$(INC) $(5) -c -o $$@ $$<
 
-hisat2-repeat-debug: hisat2_repeat.cpp $(REPEAT_CPPS) $(SHARED_CPPS) $(HEADERS)
-	$(CXX) $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DBOWTIE_64BIT_INDEX -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_REPEAT_CPPS_MAIN) \
-	$(LIBS) $(BUILD_LIBS)
+$(1): $$($(1)_OBJS)
+	$$(CXX) $(3) $$(EXTRA_FLAGS) -o $$@ $$^ $$(LIBS) $(6)
 
+-include $$($(1)_OBJS:.o=.d)
+endef
 
-#
-# hisat2-build targets
-#
+REL_FLAGS := $(RELEASE_FLAGS) $(RELEASE_DEFS)
+DBG_FLAGS := $(DEBUG_FLAGS) $(DEBUG_DEFS)
+ALIGN_SRCS   := hisat2.cpp $(SHARED_CPPS) $(HISAT2_CPPS_MAIN)
+BUILD_SRCS   := hisat2_build.cpp $(SHARED_CPPS) $(HISAT2_BUILD_CPPS_MAIN)
+INSPECT_SRCS := hisat2_inspect.cpp $(SHARED_CPPS)
+REPEAT_SRCS  := hisat2_repeat.cpp $(SHARED_CPPS) $(HISAT2_REPEAT_CPPS_MAIN)
+BP_SRCS      := hisat_bp.cpp $(SHARED_CPPS) $(HISAT2_CPPS_MAIN)
 
-hisat2-build-s: hisat2_build.cpp $(SHARED_CPPS) $(HEADERS)
-	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall -DMASSIVE_DATA_RLCSA \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_BUILD_CPPS_MAIN) \
-	$(LIBS) $(BUILD_LIBS)
+$(eval $(call BUILD_TARGET,hisat2-align-s,$(ALIGN_SRCS),$(REL_FLAGS),$(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS),$(SEARCH_INC),$(SRA_LIB) $(SEARCH_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-align-l,$(ALIGN_SRCS),$(REL_FLAGS),$(SRA_DEF) -DBOWTIE2 -DBOWTIE_64BIT_INDEX $(NOASSERT_FLAGS),$(SEARCH_INC),$(SRA_LIB) $(SEARCH_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-align-s-debug,$(ALIGN_SRCS),$(DBG_FLAGS),$(SRA_DEF) -DBOWTIE2,$(SEARCH_INC),$(SRA_LIB) $(SEARCH_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-align-l-debug,$(ALIGN_SRCS),$(DBG_FLAGS),$(SRA_DEF) -DBOWTIE2 -DBOWTIE_64BIT_INDEX,$(SEARCH_INC),$(SRA_LIB) $(SEARCH_LIBS)))
 
-hisat2-build-l: hisat2_build.cpp $(SHARED_CPPS) $(HEADERS)
-	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DBOWTIE_64BIT_INDEX $(NOASSERT_FLAGS) -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_BUILD_CPPS_MAIN) \
-	$(LIBS) $(BUILD_LIBS)
+$(eval $(call BUILD_TARGET,hisat2-build-s,$(BUILD_SRCS),$(REL_FLAGS),-DBOWTIE2 $(NOASSERT_FLAGS) -DMASSIVE_DATA_RLCSA,,$(BUILD_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-build-l,$(BUILD_SRCS),$(REL_FLAGS),-DBOWTIE2 -DBOWTIE_64BIT_INDEX $(NOASSERT_FLAGS),,$(BUILD_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-build-s-debug,$(BUILD_SRCS),$(DBG_FLAGS),-DBOWTIE2 -DMASSIVE_DATA_RLCSA,,$(BUILD_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-build-l-debug,$(BUILD_SRCS),$(DBG_FLAGS),-DBOWTIE2 -DBOWTIE_64BIT_INDEX,,$(BUILD_LIBS)))
 
-hisat2-build-s-debug: hisat2_build.cpp $(SHARED_CPPS) $(HEADERS)
-	$(CXX) $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -Wall -DMASSIVE_DATA_RLCSA \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_BUILD_CPPS_MAIN) \
-	$(LIBS) $(BUILD_LIBS)
+$(eval $(call BUILD_TARGET,hisat2-inspect-s,$(INSPECT_SRCS),$(REL_FLAGS),-DBOWTIE2 -DHISAT2_INSPECT_MAIN,,$(INSPECT_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-inspect-l,$(INSPECT_SRCS),$(REL_FLAGS),-DBOWTIE2 -DBOWTIE_64BIT_INDEX -DHISAT2_INSPECT_MAIN,,$(INSPECT_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-inspect-s-debug,$(INSPECT_SRCS),$(DBG_FLAGS),-DBOWTIE2 -DHISAT2_INSPECT_MAIN,,$(INSPECT_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-inspect-l-debug,$(INSPECT_SRCS),$(DBG_FLAGS),-DBOWTIE2 -DBOWTIE_64BIT_INDEX -DHISAT2_INSPECT_MAIN,,$(INSPECT_LIBS)))
 
-hisat2-build-l-debug: hisat2_build.cpp $(SHARED_CPPS) $(HEADERS)
-	$(CXX) $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DBOWTIE_64BIT_INDEX -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_BUILD_CPPS_MAIN) \
-	$(LIBS) $(BUILD_LIBS)
+$(eval $(call BUILD_TARGET,hisat2-repeat,$(REPEAT_SRCS),$(REL_FLAGS),-DBOWTIE2 $(NOASSERT_FLAGS) -DMASSIVE_DATA_RLCSA,,$(BUILD_LIBS)))
+$(eval $(call BUILD_TARGET,hisat2-repeat-debug,$(REPEAT_SRCS),$(DBG_FLAGS),-DBOWTIE2 -DMASSIVE_DATA_RLCSA,,$(BUILD_LIBS)))
 
-#
-# hisat2 targets
-#
-
-hisat2-align-s: hisat2.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
-	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) $(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall \
-	$(INC) $(SEARCH_INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
-	$(LIBS) $(SRA_LIB) $(SEARCH_LIBS)
-
-hisat2-align-l: hisat2.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
-	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) $(SRA_DEF) -DBOWTIE2 -DBOWTIE_64BIT_INDEX $(NOASSERT_FLAGS) -Wall \
-	$(INC) $(SEARCH_INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
-	$(LIBS) $(SRA_LIB) $(SEARCH_LIBS)
-
-hisat2-align-s-debug: hisat2.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
-	$(CXX) $(DEBUG_FLAGS) \
-	$(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) $(SRA_DEF) -DBOWTIE2 -Wall \
-	$(INC) $(SEARCH_INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
-	$(LIBS) $(SRA_LIB) $(SEARCH_LIBS)
-
-hisat2-align-l-debug: hisat2.cpp $(SEARCH_CPPS) $(SHARED_CPPS) $(HEADERS) $(SEARCH_FRAGMENTS)
-	$(CXX) $(DEBUG_FLAGS) \
-	$(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) $(SRA_DEF) -DBOWTIE2 -DBOWTIE_64BIT_INDEX -Wall \
-	$(INC) $(SEARCH_INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) $(HISAT2_CPPS_MAIN) \
-	$(LIBS) $(SRA_LIB) $(SEARCH_LIBS)
-
-#
-# hisat2-inspect targets
-#
-
-hisat2-inspect-s: hisat2_inspect.cpp $(HEADERS) $(SHARED_CPPS)
-	$(CXX) $(RELEASE_FLAGS) \
-	$(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DHISAT2_INSPECT_MAIN -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) \
-	$(LIBS) $(INSPECT_LIBS)
-
-hisat2-inspect-l: hisat2_inspect.cpp $(HEADERS) $(SHARED_CPPS)
-	$(CXX) $(RELEASE_FLAGS) \
-	$(RELEASE_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DBOWTIE_64BIT_INDEX -DHISAT2_INSPECT_MAIN -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) \
-	$(LIBS) $(INSPECT_LIBS)
-
-hisat2-inspect-s-debug: hisat2_inspect.cpp $(HEADERS) $(SHARED_CPPS) 
-	$(CXX) $(DEBUG_FLAGS) \
-	$(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DHISAT2_INSPECT_MAIN -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) \
-	$(LIBS) $(INSPECT_LIBS)
-
-hisat2-inspect-l-debug: hisat2_inspect.cpp $(HEADERS) $(SHARED_CPPS) 
-	$(CXX) $(DEBUG_FLAGS) \
-	$(DEBUG_DEFS) $(EXTRA_FLAGS) \
-	$(DEFS) -DBOWTIE2 -DBOWTIE_64BIT_INDEX -DHISAT2_INSPECT_MAIN -Wall \
-	$(INC) \
-	-o $@ $< \
-	$(SHARED_CPPS) \
-	$(LIBS) $(INSPECT_LIBS)
+$(eval $(call BUILD_TARGET,hisat-bp-bin,$(BP_SRCS),$(REL_FLAGS),-DBOWTIE2 $(NOASSERT_FLAGS),$(SEARCH_INC),$(SEARCH_LIBS)))
+$(eval $(call BUILD_TARGET,hisat-bp-bin-debug,$(BP_SRCS),$(DBG_FLAGS),-DBOWTIE2,$(SEARCH_INC),$(SEARCH_LIBS)))
 
 #
 # HT2LIB targets
@@ -588,6 +489,29 @@ MANUAL: MANUAL.markdown
 	perl doc/strip_markdown.pl < $^ > $@
 
 .PHONY: clean
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DESTDIR ?=
+
+# Neither build system had an install rule; CMakeLists even declared
+# INSTALL_DIR and never used it. Installs the binaries plus the wrapper
+# scripts and the helper scripts the wrappers invoke at runtime.
+INSTALL_SCRIPTS = hisat2 hisat2-build hisat2-inspect \
+	hisat2_extract_splice_sites.py hisat2_extract_exons.py \
+	hisat2_extract_snps_haplotypes_UCSC.py hisat2_extract_snps_haplotypes_VCF.py \
+	hisat2_simulate_reads.py hisat2_read_statistics.py
+
+.PHONY: install uninstall
+install: all
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 $(HISAT2_BIN_LIST) $(DESTDIR)$(BINDIR)
+	install -m 755 $(INSTALL_SCRIPTS) $(DESTDIR)$(BINDIR)
+
+uninstall:
+	for f in $(HISAT2_BIN_LIST) $(INSTALL_SCRIPTS); do \
+		rm -f $(DESTDIR)$(BINDIR)/$$(basename $$f); \
+	done
+
 clean:
 	rm -f $(HISAT2_BIN_LIST) $(HISAT2_BIN_LIST_AUX) \
 	$(addsuffix .exe,$(HISAT2_BIN_LIST) $(HISAT2_BIN_LIST_AUX)) \
@@ -595,6 +519,7 @@ clean:
 	rm -f core.* .tmp.head
 	rm -rf *.dSYM
 	rm -rf .ht2lib-obj*
+	rm -rf .obj
 	rm -f libhisat2lib*.a libhisat2lib*.so
 
 
