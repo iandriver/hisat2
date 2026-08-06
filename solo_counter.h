@@ -31,6 +31,14 @@
 #include "read.h"
 #include "aligner_result.h"
 
+/** Cell-calling rule. Names match STARsolo. */
+enum SoloCellFilter {
+    SOLO_FILTER_NONE = 0,
+    SOLO_FILTER_CELLRANGER22,   // the classic knee: percentile of the top N, over a ratio
+    SOLO_FILTER_TOPCELLS,       // fixed number of highest-count barcodes
+    SOLO_FILTER_EMPTYDROPS      // deferred to hisat2_solo_filter.py
+};
+
 /** UMI collapsing rule. Names match STARsolo so results are comparable. */
 enum SoloUmiDedup {
     SOLO_UMI_EXACT = 0,   // distinct UMI sequences
@@ -162,6 +170,13 @@ public:
               SoloUmiDedup dedup,
               const std::string& outDir);
 
+    void setCellFilter(SoloCellFilter f, int expectedCells, double maxPercentile,
+                       int maxMinRatio, int topCells) {
+        filter_ = f; expectedCells_ = expectedCells;
+        maxPercentile_ = maxPercentile; maxMinRatio_ = maxMinRatio; topCells_ = topCells;
+    }
+    SoloCellFilter cellFilter() const { return filter_; }
+
     /** Enables allelic output. The index must outlive the counter. */
     void setVariantIndex(const SoloVariantIndex* vi) { vi_ = vi; }
     const SoloVariantIndex* variantIndex() const { return vi_; }
@@ -190,6 +205,14 @@ private:
                      const std::vector<uint32_t>& tally,
                      std::string& err) const;
     bool writeSummary(std::string& err) const;
+    /** Chooses called barcodes from per-barcode UMI totals. */
+    void callCells(const std::vector<SoloRec>& counts,
+                   const std::vector<uint32_t>& tally,
+                   std::vector<uint32_t>& called) const;
+    bool writeFiltered(const std::vector<SoloRec>& counts,
+                       const std::vector<uint32_t>& tally,
+                       const std::vector<uint32_t>& called,
+                       std::string& err) const;
     bool writeAllelic(std::vector<SoloAllelicRec>& allelic, std::string& err);
 
     const GeneModel*     gm_;
@@ -199,6 +222,11 @@ private:
     GeneFeature feature_;
     GeneStrand  strand_;
     SoloUmiDedup dedup_;
+    SoloCellFilter filter_ = SOLO_FILTER_CELLRANGER22;
+    int    expectedCells_ = 3000;
+    double maxPercentile_ = 0.99;
+    int    maxMinRatio_   = 10;
+    int    topCells_      = 3000;
     std::string outDir_;
     std::vector<SoloCounterThread*> threads_;
 
@@ -208,6 +236,7 @@ private:
     uint64_t nCounted_ = 0, nUMIs_ = 0, nCells_ = 0, nGenesDetected_ = 0;
     uint64_t nRefUMIs_ = 0, nAltUMIs_ = 0, nVariantsSeen_ = 0;
     uint64_t nRefObs_ = 0, nAltObs_ = 0;
+    uint64_t nCalledCells_ = 0, nUMIsInCells_ = 0;
 };
 
 #endif /* SOLO_COUNTER_H_ */

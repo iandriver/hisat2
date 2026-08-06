@@ -261,6 +261,9 @@ static string soloWhitelistFile;      // 10x barcode whitelist
 static string soloOutDir;             // Solo.out directory; enables counting
 static string soloUmiDedupStr;        // Exact / 1MM_CR / 1MM_All / NoDedup
 static bool   soloAllelic;            // emit per-cell REF/ALT variant matrices
+static string soloCellFilterStr;      // CellRanger2.2 / TopCells / EmptyDrops_CR / None
+static int    soloExpectedCells;      // knee filter: expected cell count
+static int    soloTopCells;           // TopCells: how many to keep
 static string novelSpliceSiteInfile;  //
 static string novelSpliceSiteOutfile; //
 static bool secondary;
@@ -514,6 +517,9 @@ static void resetOptions() {
     soloOutDir = "";
     soloUmiDedupStr = "1MM_CR";
     soloAllelic = false;
+    soloCellFilterStr = "CellRanger2.2";
+    soloExpectedCells = 3000;
+    soloTopCells = 3000;
     novelSpliceSiteInfile = "";
     novelSpliceSiteOutfile = "";
     secondary = false;       // allow secondary alignments
@@ -762,6 +768,9 @@ static struct option long_options[] = {
     {(char*)"solo-out-dir",                 required_argument, 0,        ARG_SOLO_OUT_DIR},
     {(char*)"solo-umi-dedup",               required_argument, 0,        ARG_SOLO_UMI_DEDUP},
     {(char*)"solo-allelic",                 no_argument,       0,        ARG_SOLO_ALLELIC},
+    {(char*)"solo-cell-filter",             required_argument, 0,        ARG_SOLO_CELL_FILTER},
+    {(char*)"solo-expected-cells",          required_argument, 0,        ARG_SOLO_EXPECTED_CELLS},
+    {(char*)"solo-top-cells",               required_argument, 0,        ARG_SOLO_TOP_CELLS},
     {(char*)"novel-splicesite-infile",       required_argument, 0,        ARG_NOVEL_SPLICESITE_INFILE},
     {(char*)"novel-splicesite-outfile",      required_argument, 0,        ARG_NOVEL_SPLICESITE_OUTFILE},
     {(char*)"secondary",        no_argument,       0,        ARG_SECONDARY},
@@ -1740,6 +1749,9 @@ static void parseOption(int next_option, const char *arg) {
         case ARG_SOLO_OUT_DIR: soloOutDir = arg; break;
         case ARG_SOLO_UMI_DEDUP: soloUmiDedupStr = arg; break;
         case ARG_SOLO_ALLELIC: soloAllelic = true; break;
+        case ARG_SOLO_CELL_FILTER: soloCellFilterStr = arg; break;
+        case ARG_SOLO_EXPECTED_CELLS: soloExpectedCells = parseInt(1, "--solo-expected-cells must be >= 1", arg); break;
+        case ARG_SOLO_TOP_CELLS: soloTopCells = parseInt(1, "--solo-top-cells must be >= 1", arg); break;
         case ARG_NOVEL_SPLICESITE_INFILE: novelSpliceSiteInfile = arg; break;
         case ARG_NOVEL_SPLICESITE_OUTFILE: novelSpliceSiteOutfile = arg; break;
         case ARG_SECONDARY: secondary = true; break;
@@ -4222,6 +4234,16 @@ static void driver(
                     soloCounter.setVariantIndex(&soloVariants);
                     if(gVerbose) cerr << "Tracking " << nsnp << " variants for allelic output" << endl;
                 }
+                SoloCellFilter cf = SOLO_FILTER_CELLRANGER22;
+                if(soloCellFilterStr == "None")              cf = SOLO_FILTER_NONE;
+                else if(soloCellFilterStr == "TopCells")     cf = SOLO_FILTER_TOPCELLS;
+                else if(soloCellFilterStr == "EmptyDrops_CR") cf = SOLO_FILTER_EMPTYDROPS;
+                else if(soloCellFilterStr != "CellRanger2.2") {
+                    cerr << "Error: --solo-cell-filter must be CellRanger2.2, TopCells, "
+                            "EmptyDrops_CR or None" << endl;
+                    throw 1;
+                }
+                soloCounter.setCellFilter(cf, soloExpectedCells, 0.99, 10, soloTopCells);
                 soloCounter.reserveThreads((size_t)nthreads + 1);
             }
         }

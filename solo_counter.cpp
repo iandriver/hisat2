@@ -436,8 +436,130 @@ bool SoloCounter::finalize(std::string& err) {
     }
 
     if(!writeMatrix(counts, tally, err)) return false;
+
+    if(filter_ != SOLO_FILTER_NONE) {
+        std::vector<uint32_t> called;
+        callCells(counts, tally, called);
+        nCalledCells_ = called.size();
+        std::vector<char> isCell(wl_->size(), 0);
+        for(size_t i = 0; i < called.size(); i++) isCell[called[i]] = 1;
+        for(size_t k = 0; k < counts.size(); k++)
+            if(isCell[counts[k].cb]) nUMIsInCells_ += tally[k];
+        if(!writeFiltered(counts, tally, called, err)) return false;
+
+        // EmptyDrops_CR needs an ambient-profile estimate, a Monte-Carlo
+        // simulation and an FDR correction, which live in a bundled Python
+        // script. The knee result above is already on disk, so if the script
+        // cannot run the user still has a usable filtered matrix.
+        if(filter_ == SOLO_FILTER_EMPTYDROPS) {
+            const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+            std::string raw = outDir_ + "/" + featName + "/raw";
+            std::string script = "hisat2_solo_filter.py";
+            std::string cmd = "python3 " + script + " --raw '" + raw +
+                              "' --expect-cells " + std::to_string(expectedCells_);
+            if(system((cmd + " 2>/dev/null >/dev/null").c_str()) != 0) {
+                fprintf(stderr,
+                        "Note: could not run EmptyDrops_CR automatically. The knee-filtered "
+                        "matrix has been written; to refine it run:\n  %s\n", cmd.c_str());
+            } else {
+                fprintf(stderr, "EmptyDrops_CR refinement complete.\n");
+            }
+        }
+    }
+
     if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
     if(!writeSummary(err)) return false;
+    return true;
+}
+
+void SoloCounter::callCells(const std::vector<SoloRec>& counts,
+                            const std::vector<uint32_t>& tally,
+                            std::vector<uint32_t>& called) const {
+    called.clear();
+    if(filter_ == SOLO_FILTER_NONE) return;
+
+    // Total UMIs per barcode. counts is already sorted by (cb, gene), so
+    // barcodes arrive in contiguous runs.
+    std::vector<std::pair<uint64_t, uint32_t> > perCell;   // (umis, cb)
+    for(size_t i = 0; i < counts.size(); ) {
+        size_t j = i;
+        uint64_t tot = 0;
+        while(j < counts.size() && counts[j].cb == counts[i].cb) { tot += tally[j]; j++; }
+        perCell.push_back(std::make_pair(tot, counts[i].cb));
+        i = j;
+    }
+    // Descending by count; ties broken by barcode index so the result does not
+    // depend on sort stability.
+    std::sort(perCell.begin(), perCell.end(),
+              [](const std::pair<uint64_t, uint32_t>& a, const std::pair<uint64_t, uint32_t>& b) {
+                  if(a.first != b.first) return a.first > b.first;
+                  return a.second < b.second;
+              });
+    if(perCell.empty()) return;
+
+    if(filter_ == SOLO_FILTER_TOPCELLS) {
+        size_t n = std::min((size_t)topCells_, perCell.size());
+        for(size_t i = 0; i < n; i++) called.push_back(perCell[i].second);
+    } else {
+        // CellRanger 2.2 knee: take the maxPercentile-th count among the top
+        // nExpectedCells barcodes, divide by maxMinRatio, keep everything at or
+        // above that. EmptyDrops_CR uses this as its starting point too, so the
+        // same code serves both until the Python pass refines it.
+        size_t idx = (size_t)((double)expectedCells_ * (1.0 - maxPercentile_));
+        if(idx >= perCell.size()) idx = perCell.size() - 1;
+        uint64_t umiMax = perCell[idx].first;
+        uint64_t umiMin = umiMax / (uint64_t)(maxMinRatio_ > 0 ? maxMinRatio_ : 1);
+        if(umiMin < 1) umiMin = 1;
+        for(size_t i = 0; i < perCell.size(); i++) {
+            if(perCell[i].first >= umiMin) called.push_back(perCell[i].second);
+            else break;   // sorted descending
+        }
+    }
+    std::sort(called.begin(), called.end());
+}
+
+bool SoloCounter::writeFiltered(const std::vector<SoloRec>& counts,
+                                const std::vector<uint32_t>& tally,
+                                const std::vector<uint32_t>& called,
+                                std::string& err) const {
+    const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    std::string dir = outDir_ + "/" + std::string(featName) + "/filtered";
+    if(!makeDirs(dir)) { err = "could not create output directory: " + dir; return false; }
+
+    // Called barcodes become columns 1..N, so the filtered matrix is dense in
+    // cells the way CellRanger and STARsolo emit it.
+    std::vector<uint32_t> colOf(wl_->size(), 0xffffffffu);
+    for(size_t i = 0; i < called.size(); i++) colOf[called[i]] = (uint32_t)i;
+
+    {
+        std::ofstream o((dir + "/features.tsv").c_str());
+        if(!o.good()) { err = "could not write filtered features.tsv"; return false; }
+        for(size_t g = 0; g < gm_->numGenes(); g++)
+            o << gm_->geneId(g) << "\t" << gm_->geneName(g) << "\tGene Expression\n";
+    }
+    {
+        std::ofstream o((dir + "/barcodes.tsv").c_str());
+        if(!o.good()) { err = "could not write filtered barcodes.tsv"; return false; }
+        char buf[40];
+        for(size_t i = 0; i < called.size(); i++) {
+            soloUnpack(wl_->codeAt(called[i]), wl_->cbLen(), buf);
+            o << buf << "\n";
+        }
+    }
+    size_t nz = 0;
+    for(size_t k = 0; k < counts.size(); k++)
+        if(colOf[counts[k].cb] != 0xffffffffu) nz++;
+    {
+        std::ofstream o((dir + "/matrix.mtx").c_str());
+        if(!o.good()) { err = "could not write filtered matrix.mtx"; return false; }
+        o << "%%MatrixMarket matrix coordinate integer general\n%\n";
+        o << gm_->numGenes() << " " << called.size() << " " << nz << "\n";
+        for(size_t k = 0; k < counts.size(); k++) {
+            uint32_t c = colOf[counts[k].cb];
+            if(c == 0xffffffffu) continue;
+            o << (counts[k].gene() + 1) << " " << (c + 1) << " " << tally[k] << "\n";
+        }
+    }
     return true;
 }
 
@@ -583,6 +705,14 @@ bool SoloCounter::writeSummary(std::string& err) const {
     o << "Barcodes With UMIs," << nCells_ << "\n";
     o << "Total Genes Detected," << nGenesDetected_ << "\n";
     o << "Total UMIs," << nUMIs_ << "\n";
+    if(filter_ != SOLO_FILTER_NONE) {
+        o << "Estimated Number of Cells," << nCalledCells_ << "\n";
+        o << "UMIs in Cells," << nUMIsInCells_ << "\n";
+        o.setf(std::ios::fixed); o.precision(6);
+        o << "Fraction of UMIs in Cells,"
+          << (nUMIs_ > 0 ? (double)nUMIsInCells_ / (double)nUMIs_ : 0.0) << "\n";
+        o.unsetf(std::ios::fixed);
+    }
     if(vi_ != NULL && !vi_->empty()) {
         o << "Variants Observed," << nVariantsSeen_ << "\n";
         o << "Allelic UMIs: Reference," << nRefUMIs_ << "\n";
