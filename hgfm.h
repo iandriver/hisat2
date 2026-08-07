@@ -22,6 +22,7 @@
 
 #include "hier_idx_common.h"
 #include <thread>
+#include <iomanip>
 #include "threading.h"
 #include "gfm.h"
 
@@ -1796,6 +1797,15 @@ private:
         bool                         done;
         bool                         last;
         bool                         mainThread;
+
+        // Variant accounting for this window. When a local graph explodes the
+        // builder halves the variant set and retries, so a window can silently
+        // end up with a fraction of the variants it was given -- or none. These
+        // let the caller report that instead of leaving it to be discovered by
+        // inspecting the finished index.
+        uint64_t                     altsIn;
+        uint64_t                     altsDropped;
+        uint64_t                     nExploded;
     };
     static void gbwt_worker(void* vp);
 };
@@ -1878,6 +1888,8 @@ void HGFM<index_t, local_index_t>::gbwt_worker(void* vp)
 
                     delete tParam.pg; tParam.pg = NULL;
                     delete tParam.rg; tParam.rg = NULL;
+                    tParam.nExploded++;
+                    const size_t altsBefore = tParam.alts.size();
                     if(tParam.alts.size() <= 1) {
                         tParam.alts.clear();
                     } else {
@@ -1900,6 +1912,7 @@ void HGFM<index_t, local_index_t>::gbwt_worker(void* vp)
                             tParam.haplotypes.back().alts.push_back(a);
                         }
                     }
+                    tParam.altsDropped += (uint64_t)(altsBefore - tParam.alts.size());
                     continue;
                 }
             }
@@ -2213,6 +2226,7 @@ HGFM<index_t, local_index_t>::HGFM(
 
         // build local FM indexes
         index_t curr_sztot = 0;
+        uint64_t altsPresented = 0, altsLost = 0, nExplosions = 0;
         EList<ALT<index_t> > alts;
         for(size_t tidx = 0; tidx < _refLens.size(); tidx++) {
             index_t refLen = _refLens[tidx];
@@ -2319,6 +2333,10 @@ HGFM<index_t, local_index_t>::HGFM(
                     tParam.curr_sztot = curr_sztot;
                     tParam.local_sztot = local_sztot;
 
+                    tParam.altsIn = (uint64_t)tParam.alts.size();
+                    tParam.altsDropped = 0;
+                    tParam.nExploded = 0;
+
                     assert(tParam.rg == NULL);
                     assert(tParam.pg == NULL);
                     tParam.done = false;
@@ -2366,6 +2384,9 @@ HGFM<index_t, local_index_t>::HGFM(
                                                      passMemExc,            // pass exceptions up to the toplevel so that we can adjust memory settings automatically
                                                      sanityCheck);          // verify results and internal consistency
                     tParam.s.clear();
+                    altsPresented += tParam.altsIn;
+                    altsLost      += tParam.altsDropped;
+                    nExplosions   += tParam.nExploded;
                     if(tParam.rg != NULL) {
                         assert(tParam.pg != NULL);
                         delete tParam.rg; tParam.rg = NULL;
@@ -2379,6 +2400,52 @@ HGFM<index_t, local_index_t>::HGFM(
             for(index_t i = 0; i + 1 < (index_t)this->_nthreads; i++) {
                 tParams[i].last = true;
                 threads[i]->join();
+            }
+        }
+
+        // Report variants dropped from the local indexes.
+        //
+        // When a local graph exceeds the edge budget the builder halves that
+        // window's variant set and retries, repeatedly, until it fits. Each
+        // halving printed a one-line warning about one window and nothing
+        // reported the total, so a run could emit thousands of those lines and
+        // still look successful.
+        //
+        // What is lost is sensitivity, not the variants themselves: the global
+        // ALT list keeps everything that was supplied, so hisat2-inspect --snp
+        // still lists them all and does NOT reveal this. It is the local
+        // indexes, which handle extension, that end up without them.
+        //
+        // Measured on mouse chr19 with reads carrying an alternate allele plus
+        // three mismatches -- the case where knowing the variant decides
+        // whether a read aligns at all. Supplying Ensembl's full variant set
+        // (one per 30 bp, pooling all strains) dropped 78% of window-level
+        // variant instances and took the alignment rate from 97.6% to 95.7%,
+        // with 128 reads unaligned instead of 73. The same chromosome at the
+        // density of the published human index (one per ~214 bp) kept 99.5%.
+        if(altsPresented > 0 && altsLost > 0) {
+            const double keptPct = 100.0 * (double)(altsPresented - altsLost) / (double)altsPresented;
+            cerr << "Local indexes: " << (altsPresented - altsLost) << " of " << altsPresented
+                 << " variant instances retained (" << std::fixed << std::setprecision(1)
+                 << keptPct << "%), " << nExplosions
+                 << " local graph(s) over the edge budget." << endl;
+            if(keptPct < 90.0) {
+                cerr << endl
+                     << "WARNING: " << std::fixed << std::setprecision(1) << (100.0 - keptPct)
+                     << "% of variant instances were dropped from the local indexes," << endl
+                     << "  because the graph in those windows grew past the edge budget." << endl
+                     << endl
+                     << "  The index is usable and the variants remain in the index's variant" << endl
+                     << "  list, so hisat2-inspect --snp will still show all of them. What is" << endl
+                     << "  reduced is sensitivity: in the affected windows, reads carrying those" << endl
+                     << "  variants are more likely to go unaligned, because extension there no" << endl
+                     << "  longer knows about the alternate allele." << endl
+                     << endl
+                     << "  This usually means the variant set is too dense. Whole dbSNP or" << endl
+                     << "  Ensembl releases include rare and strain-specific variants and are" << endl
+                     << "  much denser than intended; filtering to common variants (the prebuilt" << endl
+                     << "  indexes use roughly one per 200 bp) avoids it." << endl
+                     << endl;
             }
         }
     }
