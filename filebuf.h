@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #ifdef WITH_ZLIB
 #include <zlib.h>
+#include "bam.h"
 #endif
 #include "assert_helpers.h"
 
@@ -643,6 +644,10 @@ public:
 	 */
 	OutFileBuf(const std::string& out, bool binary = false) :
 		name_(out.c_str()), cur_(0), closed_(false)
+#ifdef WITH_ZLIB
+		, bam_(NULL)
+#endif
+
 	{
 		out_ = fopen(out.c_str(), binary ? "wb" : "w");
 		if(out_ == NULL) {
@@ -658,6 +663,10 @@ public:
 	 */
 	OutFileBuf(const char *out, bool binary = false) :
 		name_(out), cur_(0), closed_(false)
+#ifdef WITH_ZLIB
+		, bam_(NULL)
+#endif
+
 	{
 		assert(out != NULL);
 		out_ = fopen(out, binary ? "wb" : "w");
@@ -670,7 +679,11 @@ public:
 	/**
 	 * Open a new output stream to standard out.
 	 */
-	OutFileBuf() : name_("cout"), cur_(0), closed_(false) {
+	OutFileBuf() : name_("cout"), cur_(0), closed_(false)
+#ifdef WITH_ZLIB
+		, bam_(NULL)
+#endif
+	{
 		out_ = stdout;
 	}
 	
@@ -698,6 +711,9 @@ public:
 	 */
 	void write(char c) {
 		assert(!closed_);
+#ifdef WITH_ZLIB
+		if(bam_ != NULL) { bam_->writeSamText(&c, 1); return; }
+#endif
 		if(cur_ == BUF_SZ) flush();
 		buf_[cur_++] = c;
 	}
@@ -708,6 +724,9 @@ public:
 	void writeString(const std::string& s) {
 		assert(!closed_);
 		size_t slen = s.length();
+#ifdef WITH_ZLIB
+		if(bam_ != NULL) { bam_->writeSamText(s.data(), slen); return; }
+#endif
 		if(cur_ + slen > BUF_SZ) {
 			if(cur_ > 0) flush();
 			if(slen >= BUF_SZ) {
@@ -731,6 +750,9 @@ public:
 	void writeString(const T& s) {
 		assert(!closed_);
 		size_t slen = s.length();
+#ifdef WITH_ZLIB
+		if(bam_ != NULL) { bam_->writeSamText(s.toZBuf(), slen); return; }
+#endif
 		if(cur_ + slen > BUF_SZ) {
 			if(cur_ > 0) flush();
 			if(slen >= BUF_SZ) {
@@ -752,6 +774,9 @@ public:
 	 */
 	void writeChars(const char * s, size_t len) {
 		assert(!closed_);
+#ifdef WITH_ZLIB
+		if(bam_ != NULL) { bam_->writeSamText(s, len); return; }
+#endif
 		if(cur_ + len > BUF_SZ) {
 			if(cur_ > 0) flush();
 			if(len >= BUF_SZ) {
@@ -780,12 +805,34 @@ public:
 	 */
 	void close() {
 		if(closed_) return;
+#ifdef WITH_ZLIB
+		if(bam_ != NULL) {
+			// The BAM writer owns the stream from here: closing it flushes the
+			// last BGZF block and appends the EOF marker.
+			bam_->close();
+			delete bam_;
+			bam_ = NULL;
+			closed_ = true;
+			return;
+		}
+#endif
 		if(cur_ > 0) flush();
 		closed_ = true;
 		if(out_ != stdout) {
 			fclose(out_);
 		}
 	}
+
+#ifdef WITH_ZLIB
+	/**
+	 * Switch this stream to BAM.  Everything subsequently written is treated
+	 * as SAM text and converted; see bam.h.  Takes ownership of the writer.
+	 */
+	void setBam(BamWriter *bam) { bam_ = bam; }
+	bool isBam() const { return bam_ != NULL; }
+	FILE *fileHandle() { return out_; }
+	bool ownsFileHandle() const { return out_ != stdout; }
+#endif
 
 	/**
 	 * Reset so that the next write is as though it's the first.
@@ -826,6 +873,9 @@ private:
 	size_t      cur_;
 	char        buf_[BUF_SZ]; // (large) input buffer
 	bool        closed_;
+#ifdef WITH_ZLIB
+	BamWriter  *bam_;         // non-NULL when this stream is BAM
+#endif
 };
 
 #endif /*ndef FILEBUF_H_*/

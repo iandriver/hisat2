@@ -745,6 +745,20 @@ either `--met-stderr` or `--met-file` are specified.  Default: 1.
 
 #### SAM options
 
+    --bam
+
+Write BGZF-compressed BAM instead of SAM.  Output goes to the file named by
+`-S`, or to standard output if `-S` is omitted.  Requires a build with zlib.
+Cannot be combined with `--no-hd` or `--no-sq`: BAM records refer to references
+by index, so the `@SQ` lines are what makes them meaningful.
+
+    --bam-compression <int>
+
+BGZF compression level for `--bam`, from 0 (no compression) to 9.  Default: 6,
+which matches what `samtools view -b` writes.  Blocks are compressed on `-p`
+threads, so the default costs little over writing SAM; lower it only when
+output is on the critical path and file size does not matter.
+
     --no-unal
 
 Suppress SAM records for reads that failed to align.

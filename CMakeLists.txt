@@ -73,6 +73,7 @@ set(SHARED_CPPS
 	limit.cpp
 	multikey_qsort.cpp
 	random_source.cpp
+	bam.cpp
 	reference.cpp
 	ref_read.cpp
 	shmem.cpp

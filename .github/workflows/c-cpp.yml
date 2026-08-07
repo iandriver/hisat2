@@ -51,6 +51,13 @@ jobs:
     # shebang that fails on every current distro went unnoticed. The suite
     # exercises both, builds an index, and checks reproducibility and thread
     # invariance.
+    #
+    # samtools is the oracle for the BAM tests: our BAM must convert back to
+    # exactly the SAM we would have written. Without it those checks skip.
+    - name: install samtools
+      if: matrix.buildsys == 'make' && startsWith(matrix.os, 'ubuntu')
+      run: sudo apt-get update && sudo apt-get install -y samtools
+
     - name: correctness tests
       if: matrix.buildsys == 'make'
       run: tests/run_tests.sh

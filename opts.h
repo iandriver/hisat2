@@ -187,7 +187,9 @@ enum {
     ARG_DP,
     ARG_REPEAT,
     ARG_NO_REPEAT_INDEX,
-    ARG_READ_LENGTHS
+    ARG_READ_LENGTHS,
+    ARG_BAM,                    // --bam
+    ARG_BAM_COMPRESSION         // --bam-compression
 };
 
 #endif

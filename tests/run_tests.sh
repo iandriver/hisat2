@@ -14,6 +14,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 cd "$ROOT"
 
+CXX="${CXX:-c++}"
 IDX=example/index/22_20-21M_snp
 R1=example/reads/reads_1.fa
 R2=example/reads/reads_2.fa
@@ -120,7 +121,58 @@ else
     echo "  skip  built without zlib"
 fi
 
-echo "== 7. paired and unpaired modes both work =="
+echo "== 7. BAM output =="
+# samtools is the oracle: converting our BAM back to SAM must reproduce what
+# SAM mode wrote, record for record. @PG differs by construction (the command
+# line contains --bam, and samtools appends its own line).
+if ! ./hisat2-align-s --version 2>/dev/null | grep -q '\-DWITH_ZLIB'; then
+    echo "  skip  built without zlib"
+elif ! command -v samtools > /dev/null 2>&1; then
+    echo "  skip  samtools not installed"
+else
+    ./hisat2 -x $IDX -f -1 $R1 -2 $R2 -p 1 --seed 0 --reorder --bam \
+        -S "$TMP/a.bam" > /dev/null 2>&1
+    if samtools quickcheck "$TMP/a.bam" 2>/dev/null; then
+        ok "BAM passes samtools quickcheck (valid BGZF, EOF block present)"
+    else
+        bad "samtools quickcheck rejected the BAM"
+    fi
+    samtools view -h "$TMP/a.bam" 2>/dev/null | grep -v '^@PG' > "$TMP/rt.sam"
+    grep -v '^@PG' "$TMP/a.sam" > "$TMP/ref.sam"
+    if diff -q "$TMP/ref.sam" "$TMP/rt.sam" > /dev/null 2>&1; then
+        ok "BAM round-trips to identical SAM ($(grep -vc '^@' "$TMP/ref.sam") records)"
+    else
+        bad "BAM round-trip differs from SAM"
+    fi
+
+    # Exercises what HISAT2 itself never emits: float and array tags, every
+    # CIGAR operation, odd-length SEQ, '*' SEQ/QUAL, and the integer widths the
+    # tag encoder switches between.
+    if $CXX -std=c++17 -DWITH_ZLIB -iquote . -o "$TMP/unit_bam" \
+            tests/unit_bam.cpp bam.cpp -lz > /dev/null 2>&1 \
+       && "$TMP/unit_bam" "$TMP/unit.bam" > /dev/null 2>&1; then
+        if samtools view "$TMP/unit.bam" > "$TMP/unit_rt.sam" 2>/dev/null; then
+            # The test's own records are the expectation: every field must come
+            # back byte for byte.
+            if [ "$(wc -l < "$TMP/unit_rt.sam" | tr -d ' ')" = "8" ] && \
+               grep -q 'Zh:f:3.5' "$TMP/unit_rt.sam" && \
+               grep -q 'Zi:B:c,-1,2,-3' "$TMP/unit_rt.sam" && \
+               grep -q 'Zj:B:i,100000,-100000' "$TMP/unit_rt.sam" && \
+               grep -q 'Zg:i:-2147483648' "$TMP/unit_rt.sam" && \
+               grep -q '1H2S3M1I1P1D3N2=1X1S1H' "$TMP/unit_rt.sam"; then
+                ok "BAM encoder unit test: tags, CIGAR ops, odd SEQ, '*' fields"
+            else
+                bad "BAM encoder unit test produced unexpected records"
+            fi
+        else
+            bad "samtools could not read the unit-test BAM"
+        fi
+    else
+        bad "BAM encoder unit test failed to build or run"
+    fi
+fi
+
+echo "== 8. paired and unpaired modes both work =="
 ./hisat2 -x $IDX -f -U $R1 -p 1 --seed 0 -S /dev/null --summary-file "$TMP/u.txt" > /dev/null 2>&1
 urate=$(sed -n 's/^\([0-9.]*\)% overall alignment rate/\1/p' "$TMP/u.txt")
 if awk -v r="${urate:-0}" 'BEGIN { exit !(r+0 >= 90) }'; then
