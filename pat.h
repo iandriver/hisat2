@@ -884,6 +884,23 @@ protected:
 	void open() {
 		if(fb_.isOpen()) fb_.close();
 		while(filecur_ < infiles_.size()) {
+#ifdef WITH_ZLIB
+			// zlib reads plain and gzipped input through the same handle, so
+			// there is nothing to sniff and no second code path.
+			const bool isStdin = (infiles_[filecur_] == "-");
+			gzFile in = isStdin
+				? gzdopen(fileno(stdin), "rb")
+				: gzopen(infiles_[filecur_].c_str(), "rb");
+			if(in == NULL) {
+				if(!errs_[filecur_]) {
+					cerr << "Warning: Could not open read file \"" << infiles_[filecur_].c_str() << "\" for reading; skipping..." << endl;
+					errs_[filecur_] = true;
+				}
+				filecur_++;
+				continue;
+			}
+			fb_.newFile(in, isStdin);
+#else
 			// Open read
 			FILE *in;
 			if(infiles_[filecur_] == "-") {
@@ -897,6 +914,7 @@ protected:
 				continue;
 			}
 			fb_.newFile(in);
+#endif
 			return;
 		}
 		cerr << "Error: No input read files were valid" << endl;

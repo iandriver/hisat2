@@ -18,6 +18,7 @@ endif()
 option(BOWTIE_MM "enable memory mapping" ON)
 option(BOWTIE_SHARED_MEM "enable shared memory mapping" OFF)
 option(USE_SRA "enable NCBI SRA Toolkit" OFF)
+option(WITH_ZLIB "read gzipped input natively instead of via the wrapper's named pipes" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_VERBOSE_MAKEFILE true)
@@ -227,6 +228,16 @@ target_compile_options(hisat2-inspect-s PUBLIC "-DHISAT2_INSPECT_MAIN")
 target_compile_options(hisat2-inspect-l PUBLIC "-DHISAT2_INSPECT_MAIN")
 
 target_compile_options(hisat2-build-s PUBLIC "-DMASSIVE_DATA_RLCSA")
+
+# Native gzip input. See the WITH_ZLIB block in the Makefile; without it the
+# hisat2 wrapper has to fork a `gzip -dc` per stream through a named pipe.
+if(WITH_ZLIB)
+	find_package(ZLIB REQUIRED)
+	foreach(tgt ${HISAT2_BIN_LIST})
+		target_compile_definitions(${tgt} PRIVATE WITH_ZLIB)
+		target_link_libraries(${tgt} ZLIB::ZLIB)
+	endforeach()
+endif()
 
 target_compile_options(hisat2lib_static PUBLIC "-fPIC")
 target_include_directories(hisat2lib_static PUBLIC hisat2lib)

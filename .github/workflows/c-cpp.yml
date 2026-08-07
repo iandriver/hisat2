@@ -21,6 +21,9 @@ jobs:
           # which no x86 runner covers.
           - { os: ubuntu-24.04-arm, compiler: g++,     buildsys: make }
           - { os: macos-latest,     compiler: clang++, buildsys: make }
+          # WITH_ZLIB=0 keeps the pre-zlib path (wrapper named pipes) building.
+          # Nothing else covers it, so it would rot silently.
+          - { os: ubuntu-latest,    compiler: g++,     buildsys: make, makeargs: "WITH_ZLIB=0" }
 
     steps:
     - uses: actions/checkout@v4
@@ -35,7 +38,7 @@ jobs:
       # runs; scope it to macOS, which is the only place it means anything.
       env:
         DEVELOPER_DIR: ${{ startsWith(matrix.os, 'macos') && '/Applications/Xcode.app/Contents/Developer' || '' }}
-      run: make -j${{ steps.n.outputs.n }} CXX=${{ matrix.compiler }}
+      run: make -j${{ steps.n.outputs.n }} CXX=${{ matrix.compiler }} ${{ matrix.makeargs }}
 
     - name: build (cmake)
       if: matrix.buildsys == 'cmake'

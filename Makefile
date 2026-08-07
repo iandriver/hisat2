@@ -120,7 +120,20 @@ ifeq (1,$(USE_SRA))
 	SEARCH_LIBS += -L$(NCBI_NGS_DIR)/lib64 -L$(NCBI_VDB_DIR)/lib64
 endif
 
-LIBS = $(PTHREAD_LIB)
+# Native gzip input. On by default: 10x and every other current sequencing
+# platform ships gzipped FASTQ, and without this the wrapper has to fork a
+# `gzip -dc` per stream through a named pipe. Build with WITH_ZLIB=0 to fall
+# back to that path.
+WITH_ZLIB ?= 1
+ZLIB_DEF =
+ZLIB_LIB =
+ifeq (1,$(WITH_ZLIB))
+	ZLIB_DEF = -DWITH_ZLIB
+	ZLIB_LIB = -lz
+endif
+EXTRA_FLAGS += $(ZLIB_DEF)
+
+LIBS = $(PTHREAD_LIB) $(ZLIB_LIB)
 
 SHARED_CPPS = ccnt_lut.cpp ref_read.cpp alphabet.cpp shmem.cpp \
 	edit.cpp gfm.cpp \

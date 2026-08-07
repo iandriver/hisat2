@@ -92,7 +92,35 @@ else
     bad "alignment against the freshly built index: ${frate}%"
 fi
 
-echo "== 6. paired and unpaired modes both work =="
+echo "== 6. gzipped input matches plain input =="
+# Only meaningful when the binary was built with zlib; a WITH_ZLIB=0 build
+# leaves .gz to the wrapper's named pipes, which this test does not exercise.
+if ./hisat2-align-s --version 2>/dev/null | grep -q '\-DWITH_ZLIB'; then
+    gzip -c $R1 > "$TMP/r1.fa.gz"
+    gzip -c $R2 > "$TMP/r2.fa.gz"
+    ./hisat2 -x $IDX -f -1 "$TMP/r1.fa.gz" -2 "$TMP/r2.fa.gz" -p 1 --seed 0 --reorder \
+        -S "$TMP/gz.sam" > /dev/null 2>&1
+    if [ "$(hash_of "$TMP/gz.sam")" = "$h1" ]; then
+        ok "gzipped input is byte-identical to plain"
+    else
+        bad "gzipped input differs from plain"
+    fi
+
+    # A truncated file used to look like a short one: the wrapper's `gzip -dc`
+    # died into a pipe and the aligner just saw EOF, reported fewer reads and
+    # exited 0. Reading the stream natively means the error is not lost.
+    sz=$(wc -c < "$TMP/r1.fa.gz")
+    head -c $((sz / 2)) "$TMP/r1.fa.gz" > "$TMP/trunc.fa.gz"
+    if ./hisat2-align-s -x $IDX -f -U "$TMP/trunc.fa.gz" -p 1 -S /dev/null > /dev/null 2>&1; then
+        bad "truncated gzip input was accepted silently"
+    else
+        ok "truncated gzip input fails loudly"
+    fi
+else
+    echo "  skip  built without zlib"
+fi
+
+echo "== 7. paired and unpaired modes both work =="
 ./hisat2 -x $IDX -f -U $R1 -p 1 --seed 0 -S /dev/null --summary-file "$TMP/u.txt" > /dev/null 2>&1
 urate=$(sed -n 's/^\([0-9.]*\)% overall alignment rate/\1/p' "$TMP/u.txt")
 if awk -v r="${urate:-0}" 'BEGIN { exit !(r+0 >= 90) }'; then

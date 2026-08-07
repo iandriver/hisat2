@@ -27,6 +27,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdexcept>
+#include <stdlib.h>
+#ifdef WITH_ZLIB
+#include <zlib.h>
+#endif
 #include "assert_helpers.h"
 
 /**
@@ -78,10 +82,21 @@ public:
 		assert(_ins != NULL);
 	}
 
+#ifdef WITH_ZLIB
+	FileBuf(gzFile gz) {
+		init();
+		_gz = gz;
+		assert(_gz != NULL);
+	}
+#endif
+
 	/**
 	 * Return true iff there is a stream ready to read.
 	 */
 	bool isOpen() {
+#ifdef WITH_ZLIB
+		if(_gz != NULL) return true;
+#endif
 		return _in != NULL || _inf != NULL || _ins != NULL;
 	}
 
@@ -89,6 +104,15 @@ public:
 	 * Close the input stream (if that's possible)
 	 */
 	void close() {
+#ifdef WITH_ZLIB
+		if(_gz != NULL) {
+			// gzclose() on a handle from gzdopen(fileno(stdin)) would close
+			// fd 0, matching the FILE* branch's reason for sparing stdin.
+			if(!_gzIsStdin) gzclose(_gz);
+			_gz = NULL;
+			return;
+		}
+#endif
 		if(_in != NULL && _in != stdin) {
 			fclose(_in);
 		} else if(_inf != NULL) {
@@ -122,43 +146,55 @@ public:
 	 * Initialize the buffer with a new C-style file.
 	 */
 	void newFile(FILE *in) {
+		clearSources();
 		_in = in;
-		_inf = NULL;
-		_ins = NULL;
-		_cur = BUF_SZ;
-		_buf_sz = BUF_SZ;
-		_done = false;
+		rewindState();
 	}
 
 	/**
 	 * Initialize the buffer with a new ifstream.
 	 */
 	void newFile(std::ifstream *__inf) {
-		_in = NULL;
+		clearSources();
 		_inf = __inf;
-		_ins = NULL;
-		_cur = BUF_SZ;
-		_buf_sz = BUF_SZ;
-		_done = false;
+		rewindState();
 	}
 
 	/**
 	 * Initialize the buffer with a new istream.
 	 */
 	void newFile(std::istream *__ins) {
-		_in = NULL;
-		_inf = NULL;
+		clearSources();
 		_ins = __ins;
-		_cur = BUF_SZ;
-		_buf_sz = BUF_SZ;
-		_done = false;
+		rewindState();
 	}
+
+#ifdef WITH_ZLIB
+	/**
+	 * Initialize the buffer with a new zlib stream.  Handles both gzipped and
+	 * uncompressed input: zlib passes non-gzip data through untouched, so the
+	 * caller does not have to sniff the file first.
+	 */
+	void newFile(gzFile __gz, bool isStdin = false) {
+		clearSources();
+		_gz = __gz;
+		_gzIsStdin = isStdin;
+		rewindState();
+	}
+#endif
 
 	/**
 	 * Restore state as though we just started reading the input
 	 * stream.
 	 */
 	void reset() {
+#ifdef WITH_ZLIB
+		if(_gz != NULL) {
+			gzrewind(_gz);
+			rewindState();
+			return;
+		}
+#endif
 		if(_inf != NULL) {
 			_inf->clear();
 			_inf->seekg(0, std::ios::beg);
@@ -168,9 +204,7 @@ public:
 		} else {
 			rewind(_in);
 		}
-		_cur = BUF_SZ;
-		_buf_sz = BUF_SZ;
-		_done = false;
+		rewindState();
 	}
 
 	/**
@@ -189,6 +223,11 @@ public:
 			// Read a new buffer's worth of data
 			else {
 				// Get the next chunk
+#ifdef WITH_ZLIB
+				if(_gz != NULL) {
+					_buf_sz = gzread_full();
+				} else
+#endif
 				if(_inf != NULL) {
 					_inf->read((char*)_buf, BUF_SZ);
 					_buf_sz = _inf->gcount();
@@ -428,20 +467,94 @@ public:
 
 private:
 
-	void init() {
+	void clearSources() {
 		_in = NULL;
 		_inf = NULL;
 		_ins = NULL;
+#ifdef WITH_ZLIB
+		_gz = NULL;
+		_gzIsStdin = false;
+#endif
+	}
+
+	/**
+	 * Reset the read position without touching which stream we read from.
+	 */
+	void rewindState() {
+		_cur = BUF_SZ;
+		_buf_sz = BUF_SZ;
+		_done = false;
+	}
+
+	void init() {
+		clearSources();
 		_cur = _buf_sz = BUF_SZ;
 		_done = false;
 		_lastn_cur = 0;
 		// no need to clear _buf[]
 	}
 
+#ifdef WITH_ZLIB
+	/**
+	 * Fill _buf from the zlib stream, looping until it is full or the stream
+	 * ends.  gzread() is documented to return a short count only at EOF, but
+	 * looping costs nothing and keeps the "short read means EOF" rule that
+	 * peek() relies on true even when the underlying fd is a pipe.
+	 *
+	 * A decompression error is fatal rather than silent.  Under the old
+	 * approach -- a forked `gzip -dc` writing into a named pipe -- a truncated
+	 * or corrupt file looked exactly like a short input: the aligner reported
+	 * fewer reads and exited 0.
+	 */
+	size_t gzread_full() {
+		size_t got = 0;
+		while(got < BUF_SZ) {
+			int r = gzread(_gz, _buf + got, (unsigned)(BUF_SZ - got));
+			if(r < 0) {
+				// Corrupt stream: Z_DATA_ERROR, e.g. "incorrect data check".
+				gzFatal();
+			}
+			if(r == 0) {
+				// End of stream -- but a truncated file also lands here, with
+				// Z_BUF_ERROR ("unexpected end of file") left on the handle.
+				// Checking it is the difference between a clean failure and
+				// silently aligning however much of the file survived.
+				int errnum = 0;
+				gzerror(_gz, &errnum);
+				if(errnum != Z_OK && errnum != Z_STREAM_END) gzFatal();
+				break;
+			}
+			got += (size_t)r;
+		}
+		return got;
+	}
+
+	/**
+	 * Report the zlib error on _gz and stop.
+	 *
+	 * exit() rather than throw: peek() runs on worker threads, and an exception
+	 * thrown here would unwind past the handler in main() and terminate the
+	 * process with a libc++ abort message instead of a diagnostic. Matches how
+	 * PatternSource::open() reports an unusable input file.
+	 */
+	void gzFatal() {
+		int errnum = 0;
+		const char *msg = gzerror(_gz, &errnum);
+		std::cerr << "Error: could not decompress read file: "
+		          << (msg != NULL && *msg != '\0' ? msg : "unknown zlib error")
+		          << std::endl;
+		exit(1);
+	}
+#endif
+
 	static const size_t BUF_SZ = 256 * 1024;
 	FILE     *_in;
 	std::ifstream *_inf;
 	std::istream  *_ins;
+#ifdef WITH_ZLIB
+	gzFile    _gz;
+	bool      _gzIsStdin;
+#endif
 	size_t    _cur;
 	size_t    _buf_sz;
 	bool      _done;
