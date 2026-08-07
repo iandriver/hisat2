@@ -144,9 +144,13 @@ def build_gene_model(trans, gene_names):
             'juncs': sorted(gene_juncs[gene_key]),
         })
 
-    # Stable, coordinate-ordered gene indices, so that two models built from
-    # the same GTF are byte-identical and matrices are directly comparable.
-    genes.sort(key=lambda g: (g['chrom'], g['start'], g['end'], g['gene_id']))
+    # Gene order is GTF order -- gene_exons is a dict, so iterating it above
+    # yields genes in the order they first appear in the file. That is what
+    # STARsolo and rustar use, so features.tsv lines up row-for-row with
+    # theirs and matrices can be compared positionally as well as by name.
+    # It is no less deterministic than sorting: the same GTF gives the same
+    # order every time. Sorting by coordinate here instead, which this used
+    # to do, silently produced a different row order from every other tool.
     return genes
 
 
