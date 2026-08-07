@@ -6,34 +6,85 @@ on:
   pull_request:
     branches: [ master ]
 
-env:
-  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-
 jobs:
-  ubuntu:
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.buildsys }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        compiler: [g++, clang++]
-    steps:
-    - uses: actions/checkout@v4
-    - name: build-hisat2
-      run:
-        make -j$(nproc) CXX=${{ matrix.compiler }}
-    - name: test-hisat2
-      run:
-        ./hisat2 -h
+        include:
+          - { os: ubuntu-latest,    compiler: g++,     buildsys: make }
+          - { os: ubuntu-latest,    compiler: clang++, buildsys: make }
+          - { os: ubuntu-latest,    compiler: g++,     buildsys: cmake }
+          # aarch64 is a deployment target and exercises the sse2neon path,
+          # which no x86 runner covers.
+          - { os: ubuntu-24.04-arm, compiler: g++,     buildsys: make }
+          - { os: macos-latest,     compiler: clang++, buildsys: make }
+          # WITH_ZLIB=0 keeps the pre-zlib path (wrapper named pipes) building.
+          # Nothing else covers it, so it would rot silently.
+          - { os: ubuntu-latest,    compiler: g++,     buildsys: make, makeargs: "WITH_ZLIB=0" }
 
-  macos:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        compiler: [clang++]
     steps:
     - uses: actions/checkout@v4
-    - name: build-hisat2
-      run:
-        make -j$(sysctl -n hw.ncpu) CXX=${{ matrix.compiler }} 
-    - name: test-hisat2
-      run:
-        ./hisat2 -h
+
+    - name: core count
+      id: n
+      run: echo "n=$( (nproc 2>/dev/null || sysctl -n hw.ncpu) )" >> $GITHUB_OUTPUT
+
+    - name: build (make)
+      if: matrix.buildsys == 'make'
+      # Was a workflow-global env var, so it was also injected into the Linux
+      # runs; scope it to macOS, which is the only place it means anything.
+      env:
+        DEVELOPER_DIR: ${{ startsWith(matrix.os, 'macos') && '/Applications/Xcode.app/Contents/Developer' || '' }}
+      run: make -j${{ steps.n.outputs.n }} CXX=${{ matrix.compiler }} ${{ matrix.makeargs }}
+
+    - name: build (cmake)
+      if: matrix.buildsys == 'cmake'
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+        cmake --build build -j${{ steps.n.outputs.n }}
+
+    # The aligner alone was all the previous workflow checked. hisat2-build and
+    # hisat2-inspect are Python wrappers and were never invoked, which is how a
+    # shebang that fails on every current distro went unnoticed. The suite
+    # exercises both, builds an index, and checks reproducibility and thread
+    # invariance.
+    #
+    # samtools is the oracle for the BAM tests: our BAM must convert back to
+    # exactly the SAM we would have written. Without it those checks skip.
+    - name: install samtools
+      if: matrix.buildsys == 'make' && startsWith(matrix.os, 'ubuntu')
+      run: sudo apt-get update && sudo apt-get install -y samtools
+
+    - name: correctness tests
+      if: matrix.buildsys == 'make'
+      run: tests/run_tests.sh
+
+  sanitizers:
+    name: ubuntu / clang++ / asan+ubsan (informational)
+    runs-on: ubuntu-latest
+    # Informational until the pre-existing findings below are fixed, so it
+    # reports without blocking. As of this change a sanitized run reports:
+    #   - misaligned uint64_t loads in the FM-index hot loop (gfm.h:3432, :4125)
+    #   - left shift of a negative value (aligner_result.h:347)
+    #   - stack-use-after-scope at worker-thread teardown: ~AlnSinkWrap touches
+    #     an object from the worker frame after its scope ends (hisat2.cpp:3151).
+    #     It happens after results are written, which is why it goes unnoticed.
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    # Memory is managed by hand throughout and the FM-index hot loop type-puns,
+    # so a sanitized run over the example data is worth more than it costs.
+    - name: build with sanitizers
+      run: |
+        make -j$(nproc) CXX=clang++ \
+          EXTRA_FLAGS="-std=c++11 -fno-strict-aliasing -fsanitize=address,undefined -fno-omit-frame-pointer"
+    - name: run under sanitizers
+      env:
+        ASAN_OPTIONS: detect_leaks=0
+        UBSAN_OPTIONS: print_stacktrace=1
+      run: |
+        ./hisat2 -x example/index/22_20-21M_snp -f \
+          -1 example/reads/reads_1.fa -2 example/reads/reads_2.fa -p 2 -S /dev/null

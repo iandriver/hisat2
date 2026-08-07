@@ -18,6 +18,8 @@
  */
 
 #include <cmath>
+#include <thread>
+#include "threading.h"
 #include <iostream>
 #include <string>
 #include <stdexcept>
@@ -29,7 +31,6 @@
 
 #ifdef USE_SRA
 
-#include "tinythread.h"
 #include <ncbi-vdb/NGS.hpp>
 #include <ngs/ErrorMsg.hpp>
 #include <ngs/ReadCollection.hpp>
@@ -1597,12 +1598,7 @@ static void SRA_IO_Worker(void *vp)
     
     while(!sra_data->done) {
         while(sra_data->isFull()) {
-#if defined(_TTHREAD_WIN32_)
-            Sleep(1);
-#elif defined(_TTHREAD_POSIX_)
-            const static timespec ts = {0, 1000000};  // 1 millisecond
-            nanosleep(&ts, NULL);
-#endif
+            threadSleepMs(1);
         }
         pair<SRA_Read, SRA_Read>& pair = sra_data->getPairForWrite();
         SRA_Read& ra = pair.first;
@@ -1702,12 +1698,7 @@ bool SRAPatternSource::readPair(
             return false;
         }
         
-#if defined(_TTHREAD_WIN32_)
-        Sleep(1);
-#elif defined(_TTHREAD_POSIX_)
-        const static timespec ts = {0, 1000000}; // 1 millisecond
-        nanosleep(&ts, NULL);
-#endif
+        threadSleepMs(1);
     }
     
     pair<SRA_Read, SRA_Read>& pair = sra_data_->getPairForRead();
@@ -1779,7 +1770,7 @@ void SRAPatternSource::open() {
             sra_data_->paired_reads.resize(sra_data_->buffer_size);
             
             // create a thread for handling SRA data access
-            io_thread_ = new tthread::thread(SRA_IO_Worker, (void*)sra_data_);
+            io_thread_ = new std::thread(SRA_IO_Worker, (void*)sra_data_);
             // io_thread_->join();
         } catch(...) {
             if(!errs_[sra_acc_cur_]) {

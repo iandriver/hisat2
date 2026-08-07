@@ -203,8 +203,14 @@ The `hisat2`, `hisat2-build` and `hisat2-inspect` executables are actually
 wrapper scripts that call binary programs as appropriate.  The wrappers shield
 users from having to distinguish between "small" and "large" index formats,
 discussed briefly in the following section.  Also, the `hisat2` wrapper
-provides some key functionality, like the ability to handle compressed inputs,
-and the functionality for `--un`, `--al` and related options.
+provides some key functionality, like the ability to handle bzip2-compressed
+inputs, and the functionality for `--un`, `--al` and related options.
+
+Gzipped read files are read directly by the aligner and need no wrapper
+support, so `-1`, `-2` and `-U` accept `.gz` files (and gzipped input on
+stdin via `-`) whether you run the wrapper or the binary.  A build configured
+with `WITH_ZLIB=0` lacks this, and there the wrapper decompresses `.gz` for
+you as it does for `.bz2`.
 
 It is recommended that you always run the hisat2 wrappers and not run the
 binaries directly.
@@ -738,6 +744,20 @@ Write a new `hisat2` metrics record every `<int>` seconds.  Only matters if
 either `--met-stderr` or `--met-file` are specified.  Default: 1.
 
 #### SAM options
+
+    --bam
+
+Write BGZF-compressed BAM instead of SAM.  Output goes to the file named by
+`-S`, or to standard output if `-S` is omitted.  Requires a build with zlib.
+Cannot be combined with `--no-hd` or `--no-sq`: BAM records refer to references
+by index, so the `@SQ` lines are what makes them meaningful.
+
+    --bam-compression <int>
+
+BGZF compression level for `--bam`, from 0 (no compression) to 9.  Default: 6,
+which matches what `samtools view -b` writes.  Blocks are compressed on `-p`
+threads, so the default costs little over writing SAM; lower it only when
+output is on the critical path and file size does not matter.
 
     --no-unal
 

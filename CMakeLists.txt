@@ -18,8 +18,9 @@ endif()
 option(BOWTIE_MM "enable memory mapping" ON)
 option(BOWTIE_SHARED_MEM "enable shared memory mapping" OFF)
 option(USE_SRA "enable NCBI SRA Toolkit" OFF)
+option(WITH_ZLIB "read gzipped input natively instead of via the wrapper's named pipes" ON)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_VERBOSE_MAKEFILE true)
 set(CMAKE_EXPORT_COMPILE_COMMANDS on)
 set(NCBI_NGS_DIR ${NCBI_NGS_DIR})
@@ -72,10 +73,10 @@ set(SHARED_CPPS
 	limit.cpp
 	multikey_qsort.cpp
 	random_source.cpp
+	bam.cpp
 	reference.cpp
 	ref_read.cpp
 	shmem.cpp
-	tinythread.cpp
 	)
 
 set(SEARCH_CPPS
@@ -170,7 +171,9 @@ add_definitions(
 
 if(HISAT2_ARM)
 	# ARM: vendored sse2neon.h (quoted include); no POPCNT, no x86 <cpuid.h>.
-	add_compile_options(-iquote ${PROJECT_SOURCE_DIR}/third_party)
+	# SHELL: keeps the flag and its argument together; without it CMake
+	# de-duplicates the repeated -iquote token and the second path is left bare.
+	add_compile_options("SHELL:-iquote ${PROJECT_SOURCE_DIR}/third_party")
 else()
 	# x86: POPCNT path + vendored <cpuid.h>.
 	add_definitions(-DPOPCNT_CAPABILITY)
@@ -192,7 +195,11 @@ endif()
 
 # Use -iquote (not -I) for the source dir so the VERSION file does not shadow
 # libc++'s <version> header on case-insensitive filesystems (e.g. macOS).
-add_compile_options(-iquote ${PROJECT_SOURCE_DIR})
+# The FM-index reads packed data through uint64_t* casts, so strict-aliasing
+# optimisations are not safe here. The Makefile has always passed this; CMake
+# did not, which left the CMake path exposed at -O3.
+add_compile_options(-fno-strict-aliasing)
+add_compile_options("SHELL:-iquote ${PROJECT_SOURCE_DIR}")
 add_definitions(-DCOMPILER_OPTIONS="${CMAKE_CXX_FLAGS}")
 
 add_library(hisat2lib_static STATIC ${HT2LIB_CPPS} ${SHARED_CPPS})
@@ -222,6 +229,16 @@ target_compile_options(hisat2-inspect-s PUBLIC "-DHISAT2_INSPECT_MAIN")
 target_compile_options(hisat2-inspect-l PUBLIC "-DHISAT2_INSPECT_MAIN")
 
 target_compile_options(hisat2-build-s PUBLIC "-DMASSIVE_DATA_RLCSA")
+
+# Native gzip input. See the WITH_ZLIB block in the Makefile; without it the
+# hisat2 wrapper has to fork a `gzip -dc` per stream through a named pipe.
+if(WITH_ZLIB)
+	find_package(ZLIB REQUIRED)
+	foreach(tgt ${HISAT2_BIN_LIST})
+		target_compile_definitions(${tgt} PRIVATE WITH_ZLIB)
+		target_link_libraries(${tgt} ZLIB::ZLIB)
+	endforeach()
+endif()
 
 target_compile_options(hisat2lib_static PUBLIC "-fPIC")
 target_include_directories(hisat2lib_static PUBLIC hisat2lib)

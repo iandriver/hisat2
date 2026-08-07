@@ -188,7 +188,16 @@ enum {
     ARG_REPEAT,
     ARG_NO_REPEAT_INDEX,
     ARG_READ_LENGTHS,
-    ARG_GENE_ANNOTATION,
+    ARG_BAM,                    // --bam
+    ARG_BAM_COMPRESSION,        // --bam-compression
+
+    // Single-cell options start at an explicit high base rather than being
+    // appended. Appending puts them in the same place upstream adds its own
+    // entries, so every rebase conflicts here -- which is exactly what
+    // happened merging the modernization branch. The gap costs nothing:
+    // these are getopt_long values, not indices.
+    ARG_SOLO_BASE = 5000,
+    ARG_GENE_ANNOTATION = ARG_SOLO_BASE,
     ARG_GENE_FEATURE,
     ARG_GENE_STRAND,
     ARG_SOLO_CB_IN_READNAME,

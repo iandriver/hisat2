@@ -347,12 +347,36 @@ sub cat_file($$) {
 	close($ifh);
 }
 
+# Return non-zero if and only if the aligner binary was built with zlib, in
+# which case it reads gzipped input itself and does not need the named-pipe
+# machinery below.  Determined by asking the binary rather than assuming, so a
+# WITH_ZLIB=0 build keeps working.  Cached: this forks a process.
+my $binary_has_zlib = undef;
+sub binaryHasZlib() {
+	return $binary_has_zlib if defined($binary_has_zlib);
+	$binary_has_zlib = 0;
+	for my $prog ($align_prog_s, $align_prog_l) {
+		next unless -x $prog;
+		my $out = `"$prog" --version 2>/dev/null`;
+		$binary_has_zlib = 1 if defined($out) && $out =~ /-DWITH_ZLIB\b/;
+		last;
+	}
+	return $binary_has_zlib;
+}
+
 # Return non-zero if and only if the input should be wrapped (i.e. because
-# it's compressed).
+# it's compressed in a format the binary can't read itself).
+#
+# zlib handles .gz natively, which is the case that matters: every current
+# sequencing platform emits gzipped FASTQ, and a paired 10x run would otherwise
+# fork one `gzip -dc` per stream through a named pipe.  .bz2 has no in-binary
+# reader, so it still goes through the wrapper.
 sub wrapInput($$$) {
 	my ($unps, $mate1s, $mate2s) = @_;
+	my $gz_needs_wrapping = !binaryHasZlib();
 	for my $fn (@$unps, @$mate1s, @$mate2s) {
-		return 1 if $fn =~ /\.gz$/ || $fn =~ /\.bz2$/;
+		return 1 if $fn =~ /\.bz2$/;
+		return 1 if $fn =~ /\.gz$/ && $gz_needs_wrapping;
 	}
 	return 0;
 }

@@ -21,6 +21,8 @@
 #define HGFM_H_
 
 #include "hier_idx_common.h"
+#include <thread>
+#include "threading.h"
 #include "gfm.h"
 
 /**
@@ -1813,12 +1815,7 @@ void HGFM<index_t, local_index_t>::gbwt_worker(void* vp)
         } else {
             while(tParam.done) {
                 if(tParam.last) return;
-#if defined(_TTHREAD_WIN32_)
-                Sleep(1);
-#elif defined(_TTHREAD_POSIX_)
-                const static timespec ts = {0, 1000000};  // 1 millisecond
-                nanosleep(&ts, NULL);
-#endif
+                threadSleepMs(1);
             }
             if(tParam.s.length() <= 0) {
                 tParam.done = true;
@@ -2194,7 +2191,7 @@ HGFM<index_t, local_index_t>::HGFM(
     
     if(localIndex) {
         assert_gt(this->_nthreads, 0);
-        AutoArray<tthread::thread*> threads(this->_nthreads - 1);
+        AutoArray<std::thread*> threads(this->_nthreads - 1);
         EList<ThreadParam> tParams; tParams.reserveExact((size_t)this->_nthreads);
         for(index_t t = 0; t < (index_t)this->_nthreads; t++) {
             tParams.expand();
@@ -2208,7 +2205,7 @@ HGFM<index_t, local_index_t>::HGFM(
             tParams.back().seed = seed;
             if(t + 1 < (index_t)this->_nthreads) {
                 tParams.back().mainThread = false;
-                threads[t] = new tthread::thread(gbwt_worker, (void*)&tParams.back());
+                threads[t] = new std::thread(gbwt_worker, (void*)&tParams.back());
             } else {
                 tParams.back().mainThread = true;
             }
@@ -2338,12 +2335,7 @@ HGFM<index_t, local_index_t>::HGFM(
                 for(index_t t2 = 0; t2 < t; t2++) {
                     ThreadParam& tParam = tParams[t2];
                     while(!tParam.done) {
-#if defined(_TTHREAD_WIN32_)
-                        Sleep(1);
-#elif defined(_TTHREAD_POSIX_)
-                        const static timespec ts = {0, 1000000};  // 1 millisecond
-                        nanosleep(&ts, NULL);
-#endif
+                        threadSleepMs(1);
                     }
 
                     LocalGFM<local_index_t, index_t>(

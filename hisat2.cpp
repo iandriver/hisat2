@@ -18,6 +18,7 @@
  */
 
 #include <stdlib.h>
+#include <thread>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -123,7 +124,9 @@ static bool fuzzy;
 static bool fullRef;
 static bool samTruncQname; // whether to truncate QNAME to 255 chars
 static bool samOmitSecSeqQual; // omit SEQ/QUAL for 2ndary alignments?
-static bool samNoUnal; // don't print records for unaligned reads
+static bool samNoUnal;
+static bool samBam;     // write BAM instead of SAM
+static int  samBamLevel; // BGZF compression level for --bam
 static bool samNoHead; // don't print any header lines in SAM output
 static bool samNoSQ;   // don't print @SQ header lines
 static bool sam_print_as;
@@ -378,7 +381,9 @@ static void resetOptions() {
 	fullRef					= false; // print entire reference name instead of just up to 1st space
 	samTruncQname           = true;  // whether to truncate QNAME to 255 chars
 	samOmitSecSeqQual       = false; // omit SEQ/QUAL for 2ndary alignments?
-	samNoUnal               = false; // omit SAM records for unaligned reads
+	samNoUnal               = false;
+	samBam                  = false;
+	samBamLevel             = 6;
 	samNoHead				= false; // don't print any header lines in SAM output
 	samNoSQ					= false; // don't print @SQ header lines
 	sam_print_as            = true;
@@ -640,6 +645,8 @@ static struct option long_options[] = {
 	{(char*)"no-HD",        no_argument,       0,            ARG_SAM_NOHEAD},
 	{(char*)"no-SQ",        no_argument,       0,            ARG_SAM_NOSQ},
 	{(char*)"no-unal",      no_argument,       0,            ARG_SAM_NO_UNAL},
+	{(char*)"bam",          no_argument,       0,            ARG_BAM},
+	{(char*)"bam-compression", required_argument, 0,       ARG_BAM_COMPRESSION},
 	{(char*)"color",        no_argument,       0,            'C'},
 	{(char*)"sam-RG",       required_argument, 0,            ARG_SAM_RG},
 	{(char*)"sam-rg",       required_argument, 0,            ARG_SAM_RG},
@@ -741,6 +748,8 @@ static struct option long_options[] = {
 	// {(char*)"local-seed-cache-sz", required_argument, 0,     ARG_LOCAL_SEED_CACHE_SZ},
 	{(char*)"seed-cache-sz",       required_argument, 0,     ARG_CURRENT_SEED_CACHE_SZ},
 	{(char*)"no-unal",          no_argument,       0,        ARG_SAM_NO_UNAL},
+	{(char*)"bam",              no_argument,       0,        ARG_BAM},
+	{(char*)"bam-compression",  required_argument, 0,    ARG_BAM_COMPRESSION},
 	{(char*)"test-25",          no_argument,       0,        ARG_TEST_25},
 	// TODO: following should be a function of read length?
 	{(char*)"desc-kb",          required_argument, 0,        ARG_DESC_KB},
@@ -1015,6 +1024,7 @@ static void printUsage(ostream& out) {
 		<< "  --met <int>           report internal counters & metrics every <int> secs (1)" << endl
 	// Following is supported in the wrapper instead
 	//  << "  --no-unal             suppress SAM records for unaligned reads" << endl
+	    << "  --bam                 write BGZF-compressed BAM instead of SAM" << endl
 	    << "  --no-head             suppress header lines, i.e. lines starting with @" << endl
 	    << "  --no-sq               suppress @SQ header lines" << endl
 	    << "  --rg-id <text>        set read group id, reflected in @RG line and RG:Z: opt field" << endl
@@ -1385,6 +1395,16 @@ static void parseOption(int next_option, const char *arg) {
 		case ARG_SAM_NO_QNAME_TRUNC: samTruncQname = false; break;
 		case ARG_SAM_OMIT_SEC_SEQ: samOmitSecSeqQual = true; break;
 		case ARG_SAM_NO_UNAL: samNoUnal = true; break;
+		case ARG_BAM: samBam = true; break;
+		case ARG_BAM_COMPRESSION: {
+			samBamLevel = parseInt(0, "--bam-compression must be at least 0", arg);
+			if(samBamLevel > 9) {
+				cerr << "Error: --bam-compression must be between 0 and 9" << endl;
+				throw 1;
+			}
+			samBam = true;
+			break;
+		}
 		case ARG_SAM_NOHEAD: samNoHead = true; break;
 		case ARG_SAM_NOSQ: samNoSQ = true; break;
 		case ARG_SAM_PRINT_YI: sam_print_yi = true; break;
@@ -1896,7 +1916,7 @@ static void parseOptions(int argc, const char **argv) {
 	}
 	// Now parse all the presets.  Might want to pick which presets version to
 	// use according to other parameters.
-	auto_ptr<Presets> presets(new PresetsV0());
+	unique_ptr<Presets> presets(new PresetsV0());
 	// Apply default preset
 	if(!defaultPreset.empty()) {
 		polstr = applyPreset(defaultPreset, *presets.get()) + polstr;
@@ -3253,8 +3273,8 @@ static void multiseedSearchWorker_hisat2(void *vp) {
 	// problems, or generally characterize performance.
 	
 	//const BitPairReference& refs   = *multiseed_refs;
-	auto_ptr<PatternSourcePerThreadFactory> patsrcFact(createPatsrcFactory(patsrc, tid));
-	auto_ptr<PatternSourcePerThread> ps(patsrcFact->create());
+	unique_ptr<PatternSourcePerThreadFactory> patsrcFact(createPatsrcFactory(patsrc, tid));
+	unique_ptr<PatternSourcePerThread> ps(patsrcFact->create());
 	
     // Instantiate an object for holding reporting-related parameters.
     if(maxSeeds == 0) {
@@ -3275,7 +3295,7 @@ static void multiseedSearchWorker_hisat2(void *vp) {
                        repeat);
     
 	// Instantiate a mapping quality calculator
-	auto_ptr<Mapq> bmapq(new_mapq(mapqv, scoreMin, sc));
+	unique_ptr<Mapq> bmapq(new_mapq(mapqv, scoreMin, sc));
 	
 	// Make a per-thread wrapper for the global MHitSink object.
 	AlnSinkWrap<index_t> msinkwrap(
@@ -3409,11 +3429,7 @@ static void multiseedSearchWorker_hisat2(void *vp) {
                 }
                 
                 if(min_rdid + thread_rids_mindist < rdid) {
-#if defined(_TTHREAD_WIN32_)
-                    Sleep(0);
-#elif defined(_TTHREAD_POSIX_)
-                    sched_yield();
-#endif
+                    threadYield();
                 } else break;
             }
         }
@@ -3787,7 +3803,7 @@ static void multiseedSearch(
 	multiseed_metricsOfb   = metricsOfb;
 	multiseed_refs         = refs;
     multiseed_rrefs        = rrefs;
-	AutoArray<tthread::thread*> threads(nthreads);
+	AutoArray<std::thread*> threads(nthreads);
 	AutoArray<int> tids(nthreads);	
 	// Start the metrics thread
 	{
@@ -3799,7 +3815,7 @@ static void multiseedSearch(
 		for(int i = 0; i < nthreads; i++) {
 			// Thread IDs start at 1
 			tids[i] = i+1;
-            threads[i] = new tthread::thread(multiseedSearchWorker_hisat2, (void*)&tids[i]);
+            threads[i] = new std::thread(multiseedSearchWorker_hisat2, (void*)&tids[i]);
 		}
 
         for (int i = 0; i < nthreads; i++)
@@ -3875,10 +3891,29 @@ static void driver(
 	}
 	OutFileBuf *fout;
 	if(!outfile.empty()) {
-		fout = new OutFileBuf(outfile.c_str(), false);
+		fout = new OutFileBuf(outfile.c_str(), samBam);
 	} else {
 		fout = new OutFileBuf();
 	}
+#ifdef WITH_ZLIB
+	if(samBam) {
+		if(samNoHead || samNoSQ) {
+			cerr << "Error: --bam cannot be combined with --no-hd or --no-sq." << endl
+			     << "BAM records address references by index, so the @SQ lines are required." << endl;
+			throw 1;
+		}
+		BamWriter *bw = new BamWriter;
+		// Compression is the bottleneck at the default level, so give it the
+		// same thread budget the aligner has.
+		bw->init(fout->fileHandle(), fout->ownsFileHandle(), samBamLevel, (int)nthreads);
+		fout->setBam(bw);
+	}
+#else
+	if(samBam) {
+		cerr << "Error: --bam requires a build with zlib (WITH_ZLIB)." << endl;
+		throw 1;
+	}
+#endif
 	// Initialize GFM object and read in header
 	if(gVerbose || startVerbose) {
 		cerr << "About to initialize fw GFM: "; logTime(cerr, true);
@@ -4270,7 +4305,7 @@ static void driver(
 		// memory so that we can easily sanity check them later on
 		AlnSink<index_t> *mssink = NULL;
         Timer *_tRef = new Timer(cerr, "Time loading reference: ", timing);
-        auto_ptr<BitPairReference> refs(
+        unique_ptr<BitPairReference> refs(
                                         new BitPairReference(
                                                              adjIdxBase,
                                                              NULL,
