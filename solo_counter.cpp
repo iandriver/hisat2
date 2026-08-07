@@ -128,13 +128,19 @@ SoloCounter::~SoloCounter() {
 void SoloCounter::init(const GeneModel* gm,
                        const SoloWhitelist* wl,
                        const SoloParams* params,
-                       GeneFeature feature,
+                       const std::vector<GeneFeature>& features,
                        GeneStrand strand,
                        SoloUmiDedup dedup,
                        const std::string& outDir) {
     gm_ = gm; wl_ = wl; params_ = params;
-    feature_ = feature; strand_ = strand; dedup_ = dedup;
+    features_ = features; curFeat_ = 0; strand_ = strand; dedup_ = dedup;
     outDir_ = outDir;
+}
+
+SoloCounterThread::SoloCounterThread(SoloCounter* parent) : parent_(parent) {
+    // Sized here rather than on first use: the workers run concurrently, so a
+    // lazy resize would be a data race on the arena vector.
+    feats_.resize(parent->numFeatures());
 }
 
 void SoloCounter::reserveThreads(size_t n) {
@@ -162,11 +168,15 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     // Union the gene assignments over every candidate alignment. If they all
     // agree on one gene the read is unique-gene even when it is multi-locus,
     // which is what STARsolo counts by default.
-    static thread_local std::vector<uint32_t> genes, scratch, blockGenes;
+    static thread_local std::vector<uint32_t> scratch, blockGenes;
+    static thread_local std::vector<std::vector<uint32_t> > featGenes;
     static thread_local std::vector<uint32_t> bodyGenes, veloGenes, veloClasses;
     static thread_local std::vector<std::pair<int64_t, int64_t> > blocks;
     static thread_local StackedAln staln;
-    genes.clear(); veloGenes.clear(); veloClasses.clear();
+    const size_t nfeat = feats_.size();
+    if(featGenes.size() < nfeat) featGenes.resize(nfeat);
+    for(size_t fi = 0; fi < nfeat; fi++) featGenes[fi].clear();
+    veloGenes.clear(); veloClasses.clear();
 
     for(size_t i = 0; i < nresults; i++) {
         const AlnRes& rs = (*results)[i];
@@ -199,10 +209,14 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         if(haveBlock) blocks.push_back(std::make_pair(blockStart, pos));
         if(blocks.empty()) continue;
 
-        blockGenes.clear();
-        p->geneModel()->assignGenes((int32_t)rs.refid(), blocks, rs.fw(),
-                                    p->feature(), p->strand(), blockGenes, scratch);
-        for(size_t g = 0; g < blockGenes.size(); g++) genes.push_back(blockGenes[g]);
+        // One interval query per requested feature. The blocks above are what
+        // cost anything to produce, and they are shared.
+        for(size_t fi = 0; fi < nfeat; fi++) {
+            blockGenes.clear();
+            p->geneModel()->assignGenes((int32_t)rs.refid(), blocks, rs.fw(),
+                                        p->featureAt(fi), p->strand(), blockGenes, scratch);
+            for(size_t g = 0; g < blockGenes.size(); g++) featGenes[fi].push_back(blockGenes[g]);
+        }
 
         // Velocyto works off the gene body, not the exon union: an intronic
         // read is exactly the signal of interest, and the exonic assignment
@@ -264,8 +278,6 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         }
     }
 
-    std::sort(genes.begin(), genes.end());
-    genes.erase(std::unique(genes.begin(), genes.end()), genes.end());
 
     if(p->velocyto() && !veloGenes.empty() && sr.corrected()) {
         // Collapse across alignments: a molecule showing both intronic and
@@ -290,80 +302,115 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         }
     }
 
-    if(genes.empty())      { nNoGene_++;    return; }
-    if(genes.size() > 1) {
-        nMultiGene_++;
-        // Keep the gene set when multimapper resolution is on: EM needs only
-        // this, not the alignments, which is what lets resolution happen at
-        // finalize without holding anything from the streaming pass.
-        if(p->multiMapper() != SOLO_MULTI_UNIQUE && sr.corrected()) {
-            SoloMultiRec mr;
-            mr.cb  = sr.cbIdx;
-            mr.off = (uint32_t)multiGenes_.size();
-            mr.n   = (uint32_t)genes.size();
-            mr.umi = sr.umiPacked;
-            for(size_t k = 0; k < genes.size(); k++) multiGenes_.push_back(genes[k]);
-            multi_.push_back(mr);
-        }
-        return;
-    }
+    for(size_t fi = 0; fi < nfeat; fi++) {
+        std::vector<uint32_t>& genes = featGenes[fi];
+        FeatureArena& fa = feats_[fi];
+        std::sort(genes.begin(), genes.end());
+        genes.erase(std::unique(genes.begin(), genes.end()), genes.end());
 
-    nCounted_++;
-    if(sr.status == SOLO_CB_AMBIG) {
-        SoloAmbigRec ar;
-        ar.cbRaw = sr.cbPacked;
-        ar.geneAndFlags = genes[0];
-        ar.umi = sr.umiPacked;
-        ambig_.push_back(ar);
-    } else {
-        SoloRec r;
-        r.cb = sr.cbIdx;
-        r.geneAndFlags = genes[0];
-        r.umi = sr.umiPacked;
-        recs_.push_back(r);
+        if(genes.empty())      { fa.nNoGene++;    continue; }
+        if(genes.size() > 1) {
+            fa.nMultiGene++;
+            // Keep the gene set when multimapper resolution is on: EM needs only
+            // this, not the alignments, which is what lets resolution happen at
+            // finalize without holding anything from the streaming pass.
+            if(p->multiMapper() != SOLO_MULTI_UNIQUE && sr.corrected()) {
+                SoloMultiRec mr;
+                mr.cb  = sr.cbIdx;
+                mr.off = (uint32_t)fa.multiGenes.size();
+                mr.n   = (uint32_t)genes.size();
+                mr.umi = sr.umiPacked;
+                for(size_t k = 0; k < genes.size(); k++) fa.multiGenes.push_back(genes[k]);
+                fa.multi.push_back(mr);
+            }
+            continue;
+        }
+
+        fa.nCounted++;
+        if(sr.status == SOLO_CB_AMBIG) {
+            SoloAmbigRec ar;
+            ar.cbRaw = sr.cbPacked;
+            ar.geneAndFlags = genes[0];
+            ar.umi = sr.umiPacked;
+            fa.ambig.push_back(ar);
+        } else {
+            SoloRec r;
+            r.cb = sr.cbIdx;
+            r.geneAndFlags = genes[0];
+            r.umi = sr.umiPacked;
+            fa.recs.push_back(r);
+        }
     }
 }
 
 bool SoloCounter::finalize(std::string& err) {
     if(!enabled()) { err = "solo counter not initialised"; return false; }
 
-    std::vector<SoloRec> all;
-    std::vector<SoloAmbigRec> ambig;
+    // Streams that do not depend on the feature are merged once. Velocyto
+    // already queries the gene body explicitly and allele observations are
+    // positional, so neither is repeated per feature.
     std::vector<SoloAllelicRec> allelic;
     std::vector<SoloRec> velo;
-    std::vector<SoloMultiRec> multi;
-    std::vector<uint32_t> multiGenes;
-    size_t total = 0;
-    for(size_t i = 0; i < threads_.size(); i++) total += threads_[i]->recs_.size();
-    all.reserve(total);
     for(size_t i = 0; i < threads_.size(); i++) {
         SoloCounterThread* t = threads_[i];
-        all.insert(all.end(), t->recs_.begin(), t->recs_.end());
-        ambig.insert(ambig.end(), t->ambig_.begin(), t->ambig_.end());
         allelic.insert(allelic.end(), t->allelic_.begin(), t->allelic_.end());
         velo.insert(velo.end(), t->velo_.begin(), t->velo_.end());
-        // Gene-list offsets are thread-local, so rebase them onto the merged arena.
-        {
-            uint32_t base = (uint32_t)multiGenes.size();
-            for(size_t k = 0; k < t->multi_.size(); k++) {
-                SoloMultiRec mr = t->multi_[k];
-                mr.off += base;
-                multi.push_back(mr);
-            }
-            multiGenes.insert(multiGenes.end(), t->multiGenes_.begin(), t->multiGenes_.end());
-        }
         nRefObs_ += t->nRefObs_; nAltObs_ += t->nAltObs_;
         nReads_ += t->nReads_; nValidCB_ += t->nValidCB_; nAmbigCB_ += t->nAmbigCB_;
         nNoCB_ += t->nNoCB_;   nUnmapped_ += t->nUnmapped_;
-        nNoGene_ += t->nNoGene_; nMultiGene_ += t->nMultiGene_; nCounted_ += t->nCounted_;
-        // Release each arena as it is consumed, so peak memory is roughly one
-        // copy of the records rather than two.
-        std::vector<SoloRec>().swap(t->recs_);
-        std::vector<SoloAmbigRec>().swap(t->ambig_);
         std::vector<SoloAllelicRec>().swap(t->allelic_);
         std::vector<SoloRec>().swap(t->velo_);
-        std::vector<SoloMultiRec>().swap(t->multi_);
-        std::vector<uint32_t>().swap(t->multiGenes_);
+    }
+
+    for(size_t fi = 0; fi < features_.size(); fi++) {
+        curFeat_ = fi;
+        if(!finalizeFeature(fi, err)) return false;
+    }
+
+    if(!velo.empty() && !writeVelocyto(velo, err)) return false;
+    if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
+    return true;
+}
+
+/**
+ * Counts and writes one feature. Called once per --gene-feature entry, with
+ * curFeat_ set so the output helpers pick up the right name and directory.
+ */
+bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
+    // Per-feature totals. A run counting both Gene and GeneFull writes two
+    // Summary.csv files, and each must describe its own feature.
+    nNoGene_ = nMultiGene_ = nCounted_ = 0;
+    nUMIs_ = nCells_ = nGenesDetected_ = 0;
+    nCalledCells_ = nUMIsInCells_ = nMultiUMIs_ = nAmbigResolved_ = 0;
+
+    std::vector<SoloRec> all;
+    std::vector<SoloAmbigRec> ambig;
+    std::vector<SoloMultiRec> multi;
+    std::vector<uint32_t> multiGenes;
+    size_t total = 0;
+    for(size_t i = 0; i < threads_.size(); i++) total += threads_[i]->feats_[fi].recs.size();
+    all.reserve(total);
+    for(size_t i = 0; i < threads_.size(); i++) {
+        SoloCounterThread::FeatureArena& fa = threads_[i]->feats_[fi];
+        all.insert(all.end(), fa.recs.begin(), fa.recs.end());
+        ambig.insert(ambig.end(), fa.ambig.begin(), fa.ambig.end());
+        // Gene-list offsets are thread-local, so rebase them onto the merged arena.
+        {
+            uint32_t base = (uint32_t)multiGenes.size();
+            for(size_t k = 0; k < fa.multi.size(); k++) {
+                SoloMultiRec mr = fa.multi[k];
+                mr.off += base;
+                multi.push_back(mr);
+            }
+            multiGenes.insert(multiGenes.end(), fa.multiGenes.begin(), fa.multiGenes.end());
+        }
+        nNoGene_ += fa.nNoGene; nMultiGene_ += fa.nMultiGene; nCounted_ += fa.nCounted;
+        // Release each arena as it is consumed, so peak memory is roughly one
+        // copy of the records rather than two.
+        std::vector<SoloRec>().swap(fa.recs);
+        std::vector<SoloAmbigRec>().swap(fa.ambig);
+        std::vector<SoloMultiRec>().swap(fa.multi);
+        std::vector<uint32_t>().swap(fa.multiGenes);
     }
 
     // Ambiguous barcodes: now that the pass is complete, the exact-match count
@@ -535,7 +582,7 @@ bool SoloCounter::finalize(std::string& err) {
         // script. The knee result above is already on disk, so if the script
         // cannot run the user still has a usable filtered matrix.
         if(filter_ == SOLO_FILTER_EMPTYDROPS) {
-            const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+            const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
             std::string raw = outDir_ + "/" + featName + "/raw";
             std::string script = "hisat2_solo_filter.py";
             std::string cmd = "python3 " + script + " --raw '" + raw +
@@ -551,8 +598,6 @@ bool SoloCounter::finalize(std::string& err) {
     }
 
     if(!multi.empty() && !writeMultiMatrix(counts, tally, multi, multiGenes, err)) return false;
-    if(!velo.empty() && !writeVelocyto(velo, err)) return false;
-    if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
     if(!writeSummary(err)) return false;
     return true;
 }
@@ -607,7 +652,7 @@ bool SoloCounter::writeFiltered(const std::vector<SoloRec>& counts,
                                 const std::vector<uint32_t>& tally,
                                 const std::vector<uint32_t>& called,
                                 std::string& err) const {
-    const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
     std::string dir = outDir_ + "/" + std::string(featName) + "/filtered";
     if(!makeDirs(dir)) { err = "could not create output directory: " + dir; return false; }
 
@@ -751,7 +796,7 @@ bool SoloCounter::writeMultiMatrix(const std::vector<SoloRec>& counts,
         i = j;
     }
 
-    const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
     std::string raw = outDir_ + "/" + featName + "/raw";
     if(!makeDirs(raw)) { err = "could not create output directory: " + raw; return false; }
     std::string fn = raw + (multiMode_ == SOLO_MULTI_UNIFORM
@@ -924,7 +969,7 @@ bool SoloCounter::writeAllelic(std::vector<SoloAllelicRec>& allelic, std::string
 bool SoloCounter::writeMatrix(const std::vector<SoloRec>& counts,
                               const std::vector<uint32_t>& tally,
                               std::string& err) const {
-    const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
     std::string base = outDir_ + "/" + featName;
     std::string raw  = base + "/raw";
     if(!makeDirs(raw)) { err = "could not create output directory: " + raw; return false; }
@@ -962,7 +1007,7 @@ bool SoloCounter::writeMatrix(const std::vector<SoloRec>& counts,
 }
 
 bool SoloCounter::writeSummary(std::string& err) const {
-    const char* featName = (feature_ == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
     std::string path = outDir_ + "/" + featName + "/Summary.csv";
     std::ofstream o(path.c_str());
     if(!o.good()) { err = "could not write " + path; return false; }

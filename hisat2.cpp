@@ -4209,12 +4209,38 @@ static void driver(
                 cerr << "Error: " << gmErr << endl;
                 throw 1;
             }
-            GeneFeature feat = GENE_FEATURE_EXONIC;
-            if(geneFeatureStr == "GeneFull")     feat = GENE_FEATURE_BODY;
-            else if(geneFeatureStr != "Gene") {
-                cerr << "Error: --gene-feature must be Gene or GeneFull" << endl;
-                throw 1;
+            // Accepts a comma-separated list, so one alignment pass can count
+            // both features -- STARsolo's --soloFeatures Gene GeneFull. The
+            // per-read cost of the second feature is one interval query; the
+            // alignment and CIGAR work is shared.
+            std::vector<GeneFeature> feats;
+            {
+                std::string cur;
+                std::string spec = geneFeatureStr + ",";
+                for(size_t ci = 0; ci < spec.size(); ci++) {
+                    if(spec[ci] != ',') { cur += spec[ci]; continue; }
+                    if(cur.empty()) continue;
+                    GeneFeature f;
+                    if(cur == "Gene")          f = GENE_FEATURE_EXONIC;
+                    else if(cur == "GeneFull") f = GENE_FEATURE_BODY;
+                    else {
+                        cerr << "Error: --gene-feature must be Gene, GeneFull, "
+                                "or a comma-separated list of them" << endl;
+                        throw 1;
+                    }
+                    bool dup = false;
+                    for(size_t k = 0; k < feats.size(); k++) if(feats[k] == f) dup = true;
+                    if(!dup) feats.push_back(f);
+                    cur.clear();
+                }
+                if(feats.empty()) {
+                    cerr << "Error: --gene-feature must name at least one feature" << endl;
+                    throw 1;
+                }
             }
+            // The GX:Z/GN:Z tags describe a single assignment, so they follow
+            // the first feature listed.
+            GeneFeature feat = feats[0];
             GeneStrand gstrand = GENE_STRAND_UNSTRANDED;
             if(geneStrandStr == "Forward")      gstrand = GENE_STRAND_FORWARD;
             else if(geneStrandStr == "Reverse") gstrand = GENE_STRAND_REVERSE;
@@ -4248,7 +4274,7 @@ static void driver(
                     throw 1;
                 }
                 soloCounter.init(&geneModel, &soloWhitelist, &soloParams,
-                                 feat, gstrand, dd, soloOutDir);
+                                 feats, gstrand, dd, soloOutDir);
 
                 // Variant-aware output. The index keeps real rsIDs for SNPs
                 // (unlike genes, whose identity it discards), but stores them

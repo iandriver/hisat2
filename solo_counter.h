@@ -162,7 +162,7 @@ class SoloCounter;
  */
 class SoloCounterThread {
 public:
-    SoloCounterThread(SoloCounter* parent) : parent_(parent) {}
+    SoloCounterThread(SoloCounter* parent);
 
     /**
      * Records one read.
@@ -177,17 +177,30 @@ public:
 
     friend class SoloCounter;
 
+    /**
+     * Gene-assignment state for one requested feature (Gene, GeneFull, ...).
+     *
+     * Everything expensive about a read -- alignment, CIGAR, reference blocks --
+     * is independent of which feature it is counted under, so a run asking for
+     * both features does that work once and only repeats the interval query.
+     */
+    struct FeatureArena {
+        std::vector<SoloRec>      recs;
+        std::vector<SoloAmbigRec> ambig;
+        std::vector<SoloMultiRec> multi;
+        std::vector<uint32_t>     multiGenes;  // arena for the gene lists
+        uint64_t nNoGene = 0, nMultiGene = 0, nCounted = 0;
+    };
+
 private:
     SoloCounter* parent_;
-    std::vector<SoloRec>      recs_;
-    std::vector<SoloAmbigRec> ambig_;
+    std::vector<FeatureArena> feats_;
     std::vector<SoloAllelicRec> allelic_;
     std::vector<SoloRec> velo_;
-    std::vector<SoloMultiRec> multi_;
-    std::vector<uint32_t> multiGenes_;   // arena for the gene lists
-    // Per-thread tallies, summed at finalize.
+    // Per-thread tallies, summed at finalize. These count reads, not
+    // (read, feature) pairs, so they stay outside FeatureArena.
     uint64_t nReads_ = 0, nValidCB_ = 0, nAmbigCB_ = 0, nNoCB_ = 0;
-    uint64_t nUnmapped_ = 0, nNoGene_ = 0, nMultiGene_ = 0, nCounted_ = 0;
+    uint64_t nUnmapped_ = 0;
     uint64_t nRefObs_ = 0, nAltObs_ = 0;
 };
 
@@ -196,14 +209,14 @@ class SoloCounter {
 public:
     SoloCounter()
         : gm_(NULL), wl_(NULL), params_(NULL), vi_(NULL),
-          feature_(GENE_FEATURE_EXONIC), strand_(GENE_STRAND_UNSTRANDED),
+          strand_(GENE_STRAND_UNSTRANDED),
           dedup_(SOLO_UMI_1MM_CR) {}
     ~SoloCounter();
 
     void init(const GeneModel* gm,
               const SoloWhitelist* wl,
               const SoloParams* params,
-              GeneFeature feature,
+              const std::vector<GeneFeature>& features,
               GeneStrand strand,
               SoloUmiDedup dedup,
               const std::string& outDir);
@@ -240,10 +253,19 @@ public:
 
     const GeneModel*     geneModel() const { return gm_; }
     const SoloWhitelist* whitelist() const { return wl_; }
-    GeneFeature feature() const { return feature_; }
+    /**
+     * The feature currently being written. finalize() walks the requested
+     * features one at a time and the output helpers read this, so they need no
+     * per-feature plumbing of their own.
+     */
+    GeneFeature feature() const { return features_[curFeat_]; }
+    size_t numFeatures() const { return features_.size(); }
+    GeneFeature featureAt(size_t i) const { return features_[i]; }
     GeneStrand  strand()  const { return strand_; }
 
 private:
+    /** Counts and writes one requested feature. */
+    bool finalizeFeature(size_t fi, std::string& err);
     bool writeMatrix(const std::vector<SoloRec>& counts,
                      const std::vector<uint32_t>& tally,
                      std::string& err) const;
@@ -270,7 +292,8 @@ private:
     const SoloVariantIndex* vi_;
     bool velocyto_ = false;
     SoloMultiMapper multiMode_ = SOLO_MULTI_UNIQUE;
-    GeneFeature feature_;
+    std::vector<GeneFeature> features_;
+    size_t      curFeat_ = 0;
     GeneStrand  strand_;
     SoloUmiDedup dedup_;
     SoloCellFilter filter_ = SOLO_FILTER_CELLRANGER22;

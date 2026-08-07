@@ -27,12 +27,25 @@ hisat2 -x genome_index \
 The gene model is a sidecar, not part of the index, so annotation can be
 updated without the ~200 GB graph-index rebuild.
 
+### Counting both features in one pass
+
+`--gene-feature Gene,GeneFull` writes both matrices from a single alignment
+pass, which is what STARsolo's `--soloFeatures Gene GeneFull` does. Everything
+expensive about a read -- alignment, CIGAR, reference blocks -- is independent
+of the feature, so the second one costs only an extra interval query per read.
+Measured on 10M mouse reads at `-p 16`: **52.9 s and 5.42 GB for both**, against
+51.2 s + 51.6 s for two separate runs. Output is byte-identical to running each
+feature on its own.
+
+`GX:Z`/`GN:Z` describe one assignment, so they follow the feature listed first.
+Order does not otherwise matter: the matrices are identical either way.
+
 ## Options
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--gene-annotation <f>` | — | `.ht2gm` gene model; enables `GX:Z`/`GN:Z` tags |
-| `--gene-feature <s>` | `Gene` | `Gene` (exonic) or `GeneFull` (gene body, for nuclei) |
+| `--gene-feature <s>` | `Gene` | `Gene` (exonic), `GeneFull` (gene body, for nuclei), or both as a comma-separated list |
 | `--gene-strand <s>` | `Unstranded` | `Unstranded`, `Forward`, `Reverse` |
 | `--solo-barcode-mate <1\|2>` | `2` | Which mate carries CB+UMI |
 | `--solo-cb-in-readname` | off | Read CB/UMI from a `name_CB_UMI` suffix instead |
@@ -54,7 +67,7 @@ updated without the ~200 GB graph-index rebuild.
 
 ```
 Solo.out/
-  Gene/  (or GeneFull/)
+  Gene/  and/or  GeneFull/
     Summary.csv
     raw/       barcodes.tsv  features.tsv  matrix.mtx
                UniqueAndMult-{Uniform,EM}.mtx     # with --solo-multi-mappers
