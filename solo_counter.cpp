@@ -362,13 +362,18 @@ bool SoloCounter::finalize(std::string& err) {
         std::vector<SoloRec>().swap(t->velo_);
     }
 
+    // Before the per-feature loop, not after: these populate the velocyto and
+    // allelic tallies that each feature's Summary.csv reports, and
+    // finalizeFeature() writes that summary. Running them afterwards leaves
+    // every one of those lines reading zero while the matrices themselves are
+    // correct -- which is exactly what it did until this was caught.
+    if(!velo.empty() && !writeVelocyto(velo, err)) return false;
+    if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
+
     for(size_t fi = 0; fi < features_.size(); fi++) {
         curFeat_ = fi;
         if(!finalizeFeature(fi, err)) return false;
     }
-
-    if(!velo.empty() && !writeVelocyto(velo, err)) return false;
-    if(!allelic.empty() && !writeAllelic(allelic, err)) return false;
     return true;
 }
 

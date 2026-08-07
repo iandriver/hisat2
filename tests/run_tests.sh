@@ -172,7 +172,75 @@ else
     fi
 fi
 
-echo "== 8. paired and unpaired modes both work =="
+echo "== 8. single-cell counting =="
+# Uses only example/ data: make_allelic_reads.py builds barcoded reads whose
+# true REF/ALT allele is known by construction, plus a matching gene model and
+# whitelist.
+SC="$TMP/sc"
+if python3 tests/make_allelic_reads.py --fasta example/reference/22_20-21M.fa \
+        --snp example/reference/22_20-21M.snp --outdir "$SC" --nsnps 20 > /dev/null 2>&1; then
+    ./hisat2 -x $IDX -U "$SC/reads.fq" --solo-cb-in-readname \
+        --solo-cb-whitelist "$SC/whitelist.txt" --gene-annotation "$SC/model.ht2gm" \
+        --gene-strand Unstranded --solo-out-dir "$SC/Solo.out" --solo-allelic \
+        -p 4 -S /dev/null > /dev/null 2>&1
+    if [ -f "$SC/Solo.out/Allelic/raw/ref.mtx" ]; then
+        ok "--solo-allelic wrote per-cell REF/ALT matrices"
+    else
+        bad "--solo-allelic produced no Allelic output"
+    fi
+
+    # Counts must match the hand-computed expectation, and Summary.csv must
+    # agree with the matrices it summarises. Those tallies are filled in while
+    # the allelic matrices are written, so an ordering change can leave every
+    # allelic line reading zero next to correct matrices -- which it once did.
+    if python3 - "$SC" <<'PYEOF'
+import sys, os
+d = sys.argv[1]; D = os.path.join(d, "Solo.out", "Allelic", "raw")
+feats = [l.split('\t')[0] for l in open(D + "/features.tsv")]
+bcs = [l.strip() for l in open(D + "/barcodes.tsv")]
+def load(p):
+    m = {}
+    for i, l in enumerate(open(p)):
+        if i < 3: continue
+        r, c, v = l.split(); m[(feats[int(r)-1], bcs[int(c)-1])] = int(v)
+    return m
+ref, alt = load(D + "/ref.mtx"), load(D + "/alt.mtx")
+bad = 0
+for i, l in enumerate(open(os.path.join(d, "expected.tsv"))):
+    if i == 0: continue
+    bc, rs, allele, n = l.rstrip().split('\t')
+    if (ref if allele == 'ref' else alt).get((rs, bc), 0) != int(n): bad += 1
+summ = {}
+for l in open(os.path.join(d, "Solo.out", "Gene", "Summary.csv")):
+    k, _, v = l.rstrip().partition(',')
+    summ[k] = v
+if bad: sys.exit(1)
+if int(summ.get("Allelic UMIs: Reference", -1)) != sum(ref.values()): sys.exit(2)
+if int(summ.get("Allelic UMIs: Alternate", -1)) != sum(alt.values()): sys.exit(3)
+seen = set(k[0] for k in list(ref) + list(alt))
+if int(summ.get("Variants Observed", -1)) != len(seen): sys.exit(4)
+PYEOF
+    then
+        ok "allelic counts match expectation and Summary.csv"
+    else
+        bad "allelic counts or Summary.csv disagree (exit $?)"
+    fi
+
+    # Fractional counts are only legal in the UniqueAndMult-* matrices that
+    # --solo-multi-mappers writes; everything else must stay integer.
+    nonint=0
+    for m in "$SC"/Solo.out/Gene/raw/matrix.mtx "$SC"/Solo.out/Allelic/raw/ref.mtx \
+             "$SC"/Solo.out/Allelic/raw/alt.mtx; do
+        head -1 "$m" | grep -q "coordinate integer" || nonint=$((nonint+1))
+        c=$(tail -n +4 "$m" | awk '{if ($3 != int($3)) n++} END{print n+0}')
+        nonint=$((nonint + c))
+    done
+    if [ $nonint -eq 0 ]; then ok "count matrices are integer"; else bad "$nonint non-integer matrices/values"; fi
+else
+    bad "could not generate single-cell test data"
+fi
+
+echo "== 9. paired and unpaired modes both work =="
 ./hisat2 -x $IDX -f -U $R1 -p 1 --seed 0 -S /dev/null --summary-file "$TMP/u.txt" > /dev/null 2>&1
 urate=$(sed -n 's/^\([0-9.]*\)% overall alignment rate/\1/p' "$TMP/u.txt")
 if awk -v r="${urate:-0}" 'BEGIN { exit !(r+0 >= 90) }'; then
