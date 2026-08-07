@@ -800,6 +800,145 @@ When printing secondary alignments, HISAT2 by default will write out the `SEQ`
 and `QUAL` strings.  Specifying this option causes HISAT2 to print an asterisk
 in those fields instead.
 
+#### Single-cell options
+
+HISAT2 can assign alignments to genes and count them per cell barcode, writing
+matrices in the same layout STARsolo uses, so `Read10X` and
+`scanpy.read_10x_mtx` work unchanged.  See `README_SOLO.md` for the full
+description, including concordance measurements against STARsolo.
+
+Gene annotation is supplied as a sidecar file rather than being baked into the
+index, so the annotation can be changed without rebuilding the index.  Build one
+per annotation with:
+
+    hisat2_extract_genes.py --fai genome.fa.fai -o genes.ht2gm annotation.gtf
+
+A typical 10x run passes the cDNA read as mate 1 and the barcode read as mate 2:
+
+    hisat2 -x index -1 cDNA_R2.fq.gz -2 barcode_R1.fq.gz \
+        --solo-barcode-mate 2 --solo-cb-whitelist whitelist.txt \
+        --gene-annotation genes.ht2gm --gene-strand Reverse \
+        --solo-out-dir Solo.out -p 16 -S /dev/null
+
+    --gene-annotation <path>
+
+Load the gene model at `<path>` (a `.ht2gm` file, see above).  On its own this
+adds `GX:Z` and `GN:Z` optional fields to each aligned SAM record, giving the
+gene ID and gene name the alignment was assigned to; counting additionally
+requires `--solo-out-dir`.  The reference names and lengths recorded in the
+sidecar are checked against the index at load, and a mismatch is a fatal error
+rather than a silently wrong result.
+
+    --gene-feature <spec>
+
+Which feature to count.  `Gene` (default) assigns a read only if every aligned
+block falls within the gene's exons; `GeneFull` assigns it if the blocks fall
+within the gene body, so purely intronic reads count, which is what single-nucleus
+data needs.  Both may be given as a comma-separated list, `Gene,GeneFull`, and
+are then counted from a single alignment pass -- the alignment work is shared and
+only the interval query is repeated, so the second feature is nearly free.  Each
+feature gets its own subdirectory under `--solo-out-dir`.  `GX:Z`/`GN:Z` describe
+one assignment, so they follow the feature listed first.
+
+    --gene-strand <s>
+
+Strandedness of the library: `Unstranded` (default), `Forward`, or `Reverse`.
+Most 10x chemistries need `Reverse`.  Getting this wrong does not fail, it just
+assigns almost nothing, so HISAT2 warns when fewer than 10% of aligned reads
+receive a gene.
+
+    --solo-barcode-mate <1|2>
+
+Which mate carries the cell barcode and UMI.  Default: 2.  The other mate is the
+cDNA read and is the only one aligned.
+
+    --solo-cb-in-readname
+
+Take the cell barcode and UMI from a `name_CB_UMI` suffix on the read name, the
+convention UMI-tools uses, instead of from a separate mate.
+
+    --solo-cb-whitelist <path>
+
+File of accepted cell barcodes, one per line.  Required for matrix output, since
+the matrix columns are whitelist barcodes.
+
+    --solo-cb-start <int>
+
+Offset (1-based) of the cell barcode within the barcode read.  Default: 1.
+
+    --solo-cb-len <int>
+
+Length of the cell barcode.  Default: 16.
+
+    --solo-umi-start <int>
+
+Offset (1-based) of the UMI within the barcode read.  Default: 17.
+
+    --solo-umi-len <int>
+
+Length of the UMI.  Default: 12.
+
+    --solo-cb-match <s>
+
+How barcodes are matched to the whitelist: `Exact`, or `1MM` (default), which
+also accepts barcodes one substitution away from a whitelist entry.  Barcodes
+with several equally close whitelist neighbours are held back and resolved at
+the end of the run against the observed counts of the candidates.
+
+    --solo-emit-raw
+
+Also emit `CR:Z` and `UR:Z`, the barcode and UMI as sequenced, before whitelist
+correction.
+
+    --solo-out-dir <path>
+
+Write count matrices under `<path>` and enable counting.  The layout matches
+STARsolo: one directory per feature, each containing `raw/` and, unless cell
+calling is disabled, `filtered/`, with `barcodes.tsv`, `features.tsv` and
+`matrix.mtx` in each, plus a `Summary.csv` per feature.
+
+    --solo-umi-dedup <s>
+
+How UMIs are collapsed within a (cell, gene): `Exact`, `1MM_CR` (default),
+`1MM_All`, or `NoDedup`.  Names match STARsolo's so results are comparable.
+
+    --solo-cell-filter <s>
+
+How called cells are chosen for `filtered/`: `CellRanger2.2` (default, the knee
+filter), `TopCells`, `EmptyDrops_CR`, or `None` to write only `raw/`.
+`EmptyDrops_CR` runs a bundled Python script over the raw matrix; if it cannot
+run, the knee-filtered matrix is still written and the exact command to rerun is
+printed.
+
+    --solo-expected-cells <int>
+
+Expected number of cells, used by the knee filter.  Default: 3000.
+
+    --solo-top-cells <int>
+
+How many barcodes `--solo-cell-filter TopCells` keeps.  Default: 3000.
+
+    --solo-multi-mappers <s>
+
+How reads assigned to more than one gene are handled: `Unique` (default,
+discard them), `Uniform` (split evenly), or `EM` (expectation-maximisation per
+cell).  The default discards a substantial fraction of the signal for gene
+families whose members are hard to distinguish, such as ribosomal proteins;
+`EM` is worth using when those matter.  `Uniform` and `EM` write an additional
+`UniqueAndMult-*.mtx` alongside the unique-only matrix.
+
+    --solo-velocyto
+
+Also write `spliced`, `unspliced` and `ambiguous` matrices under
+`Solo.out/Velocyto/`, for RNA velocity.
+
+    --solo-allelic
+
+Write per-cell reference and alternate allele counts under `Solo.out/Allelic/`.
+Requires an index built with `--snp`: because reads align to the graph, those
+carrying non-reference alleles are not penalised at alignment time, which is the
+reference bias this is intended to avoid.
+
 #### Performance options
 
     -o/--offrate <int>
