@@ -1032,6 +1032,30 @@ static void printUsage(ostream& out) {
 	    << "                        Note: @RG line only printed when --rg-id is set." << endl
 	    << "  --omit-sec-seq        put '*' in SEQ and QUAL fields for secondary alignments." << endl
 		<< endl
+	    << " Single-cell (see README_SOLO.md for details):" << endl
+	    << "  --gene-annotation <path>  gene model (.ht2gm); enables GX:Z/GN:Z tags" << endl
+	    << "  --gene-feature <spec>     Gene, GeneFull, or both as a comma-separated" << endl
+	    << "                            list, counted in one pass (Gene)" << endl
+	    << "  --gene-strand <s>         Unstranded, Forward or Reverse (Unstranded)" << endl
+	    << "  --solo-barcode-mate <1|2> which mate carries CB+UMI (2)" << endl
+	    << "  --solo-cb-in-readname     take CB/UMI from a name_CB_UMI suffix instead" << endl
+	    << "  --solo-cb-whitelist <p>   barcode whitelist; required for matrix output" << endl
+	    << "  --solo-cb-start <n>       barcode offset in the barcode read (1)" << endl
+	    << "  --solo-cb-len <n>         barcode length (16)" << endl
+	    << "  --solo-umi-start <n>      UMI offset in the barcode read (17)" << endl
+	    << "  --solo-umi-len <n>        UMI length (12)" << endl
+	    << "  --solo-cb-match <s>       Exact or 1MM (1MM)" << endl
+	    << "  --solo-emit-raw           also emit CR:Z/UR:Z (as sequenced)" << endl
+	    << "  --solo-out-dir <path>     write matrices here; enables counting" << endl
+	    << "  --solo-umi-dedup <s>      Exact, 1MM_CR, 1MM_All or NoDedup (1MM_CR)" << endl
+	    << "  --solo-cell-filter <s>    CellRanger2.2, TopCells, EmptyDrops_CR or" << endl
+	    << "                            None (CellRanger2.2)" << endl
+	    << "  --solo-expected-cells <n> expected cells, for the knee filter (3000)" << endl
+	    << "  --solo-top-cells <n>      how many barcodes TopCells keeps (3000)" << endl
+	    << "  --solo-multi-mappers <s>  Unique, Uniform or EM (Unique)" << endl
+	    << "  --solo-velocyto           also write spliced/unspliced/ambiguous" << endl
+	    << "  --solo-allelic            per-cell REF/ALT counts (needs a SNP index)" << endl
+		<< endl
 	    << " Performance:" << endl
 	    << "  -o/--offrate <int> override offrate of index; must be >= index's offrate" << endl
 	    << "  -p/--threads <int> number of alignment threads to launch (1)" << endl
