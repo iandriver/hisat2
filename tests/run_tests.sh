@@ -240,7 +240,59 @@ else
     bad "could not generate single-cell test data"
 fi
 
-echo "== 9. paired and unpaired modes both work =="
+echo "== 9. hisat2_filter_snps.py masks pseudogenes but spares real exons =="
+# A processed pseudogene lying across a real gene's exon (the DHFRP2/HLA-B case)
+# must not cost that exon its variants.
+cat > "$TMP/f.gtf" <<'EOF'
+1	t	gene	100	200	.	+	.	gene_id "G1"; gene_biotype "protein_coding";
+1	t	exon	100	200	.	+	.	gene_id "G1"; gene_biotype "protein_coding";
+1	t	gene	500	600	.	+	.	gene_id "P1"; gene_biotype "processed_pseudogene";
+1	t	gene	480	560	.	+	.	gene_id "G2"; gene_biotype "protein_coding";
+1	t	exon	480	520	.	+	.	gene_id "G2"; gene_biotype "protein_coding";
+2	t	gene	1000	1100	.	-	.	gene_id "P2"; gene_biotype "transcribed_processed_pseudogene";
+2	t	gene	5000	5100	.	+	.	gene_id "U1"; gene_biotype "unprocessed_pseudogene";
+EOF
+# .snp positions are 0-based; the GTF above is 1-based inclusive.
+printf 'a\tsingle\t1\t150\tA\nb\tsingle\t1\t499\tC\nc\tsingle\t1\t530\tG\nd\tsingle\t1\t600\tT\ne\tdeletion\t2\t995\t6\nf\tsingle\t2\t5050\tC\n' > "$TMP/f.snp"
+printf 'ht0\t1\t150\t499\ta,b\nht1\t1\t530\t530\tc\nht2\t2\t995\t995\te\n' > "$TMP/f.hap"
+if python3 hisat2_filter_snps.py --gtf "$TMP/f.gtf" \
+        --haplotype "$TMP/f.hap" --haplotype-out "$TMP/f.out.hap" \
+        "$TMP/f.snp" "$TMP/f.out.snp" > /dev/null 2>&1; then
+    kept=$(cut -f1 "$TMP/f.out.snp" | tr '\n' ' ')
+    # a: outside any pseudogene.  b: inside P1 but also inside G2's exon.
+    # d: at 0-based 600 == 1-based 601, one past P1.  f: unprocessed, not masked.
+    # c: inside P1, only in G2's intron.  e: deletion spanning into P2.
+    if [ "$kept" = "a b d f " ]; then
+        ok "keeps protected-exon and outside variants, drops pseudogene-only ones"
+    else
+        bad "filter kept '$kept', expected 'a b d f '"
+    fi
+    # --protect '' must drop b as well
+    python3 hisat2_filter_snps.py --gtf "$TMP/f.gtf" --protect '' \
+        "$TMP/f.snp" "$TMP/f.np.snp" > /dev/null 2>&1
+    np=$(cut -f1 "$TMP/f.np.snp" | tr '\n' ' ')
+    if [ "$np" = "a d f " ]; then ok "--protect '' drops the overlapped exon too"
+    else bad "--protect '' kept '$np', expected 'a d f '"; fi
+    # haplotypes: ht0 keeps a,b; ht1 loses its only variant; ht2 likewise
+    hl=$(wc -l < "$TMP/f.out.hap" | tr -d ' ')
+    hv=$(cut -f5 "$TMP/f.out.hap" | tr '\n' ' ')
+    if [ "$hl" = "1" ] && [ "$hv" = "a,b " ]; then
+        ok "haplotypes pruned to surviving variants"
+    else
+        bad "haplotype output was $hl line(s), variants '$hv'"
+    fi
+    # every id named by a haplotype must still exist in the .snp file
+    miss=0
+    for id in $(cut -f5 "$TMP/f.out.hap" | tr ',' '\n'); do
+        cut -f1 "$TMP/f.out.snp" | grep -qx "$id" || miss=$((miss+1))
+    done
+    if [ $miss -eq 0 ]; then ok "no haplotype references a dropped variant"
+    else bad "$miss haplotype ids missing from the .snp file"; fi
+else
+    bad "hisat2_filter_snps.py failed to run"
+fi
+
+echo "== 10. paired and unpaired modes both work =="
 ./hisat2 -x $IDX -f -U $R1 -p 1 --seed 0 -S /dev/null --summary-file "$TMP/u.txt" > /dev/null 2>&1
 urate=$(sed -n 's/^\([0-9.]*\)% overall alignment rate/\1/p' "$TMP/u.txt")
 if awk -v r="${urate:-0}" 'BEGIN { exit !(r+0 >= 90) }'; then
