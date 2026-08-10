@@ -67,6 +67,13 @@ endif
 
 CXXSTD ?= -std=c++17
 EXTRA_FLAGS += $(CXXSTD)
+# Whether plain `char` is signed is implementation-defined, and the code assumes
+# it is: alphabet.cpp initialises `char` arrays with -1 as a sentinel. That
+# holds on x86 and on arm64 Darwin, but plain `char` is *unsigned* on aarch64
+# Linux (and on ppc64le and s390x), where the same initialiser is a narrowing
+# conversion and the build fails outright. Pin the signedness rather than rely
+# on the platform default; this is a no-op wherever `char` is already signed.
+EXTRA_FLAGS += -fsigned-char
 # Use -iquote . (not -I.) so the VERSION file does not shadow libc++'s
 # <version> header on case-insensitive filesystems (e.g. macOS). Local headers
 # are all included with quotes, so quoted-include search suffices.
