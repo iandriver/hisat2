@@ -199,6 +199,10 @@ endif()
 # optimisations are not safe here. The Makefile has always passed this; CMake
 # did not, which left the CMake path exposed at -O3.
 add_compile_options(-fno-strict-aliasing)
+# alphabet.cpp initialises `char` arrays with -1, which only compiles where
+# plain `char` is signed. It is unsigned on aarch64 Linux, ppc64le and s390x,
+# where the build fails outright; pin it rather than depend on the platform.
+add_compile_options(-fsigned-char)
 add_compile_options("SHELL:-iquote ${PROJECT_SOURCE_DIR}")
 add_definitions(-DCOMPILER_OPTIONS="${CMAKE_CXX_FLAGS}")
 
