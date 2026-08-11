@@ -301,6 +301,35 @@ else
     bad "unpaired alignment: ${urate}%"
 fi
 
+echo "== 9. the build reacts to header and flag changes =="
+# Checked statically rather than by touching files: `touch Makefile` would force
+# every object of all seven targets to recompile for whoever runs the suite next.
+#
+# Both halves have failed silently before. Objects that do not depend on their
+# headers keep a stale binary through a source edit -- which can make an A/B
+# comparison of two builds compare a binary against itself. Objects that do not
+# depend on the Makefile survive a change to the index width, -fsigned-char or
+# the assertion level, leaving a binary built half one way and half the other.
+MK="$ROOT/Makefile"
+objrules=$(grep -cE '^\.(obj/\$\(1\)|ht2lib-obj[a-z-]*)/%\.o:' "$MK")
+withmk=$(grep -cE '^\.(obj/\$\(1\)|ht2lib-obj[a-z-]*)/%\.o:.*[^a-zA-Z]Makefile$' "$MK")
+if [ "$objrules" -gt 0 ] && [ "$objrules" = "$withmk" ]; then
+    ok "all $objrules object rules depend on the Makefile"
+else
+    bad "only $withmk of $objrules object rules depend on the Makefile"
+fi
+mmd=$(grep -E '\$\(CXX\)|\$\$\(CXX\)' "$MK" | grep -c '\-MMD -MP')
+if [ "$mmd" = "$objrules" ]; then
+    ok "all $objrules object rules generate .d files"
+else
+    bad "$mmd of $objrules compile rules generate .d files"
+fi
+if [ "$(grep -c '^-include .*\.o=\.d\|^-include \$\$(\$(1)_OBJS:\.o=\.d)' "$MK")" -ge 2 ]; then
+    ok "generated .d files are included"
+else
+    bad "generated .d files are not included, so they have no effect"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]

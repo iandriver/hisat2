@@ -365,12 +365,19 @@ DEFS=-fno-strict-aliasing \
 # -MMD -MP emits a .d alongside each .o so header edits trigger exactly the
 # recompiles they should.
 #
+# The objects also depend on this Makefile, because the .d files track headers
+# and nothing else. Every compile here is shaped by variables defined above --
+# the index width, -fsigned-char, the zlib define, assertion and optimisation
+# levels -- and editing any of them used to leave every object in place, so a
+# flag change silently produced a binary built half one way and half the other.
+# Objects and flags have to be invalidated together.
+#
 # $(1) target   $(2) sources   $(3) build flags   $(4) defs   $(5) extra inc   $(6) extra libs
 define BUILD_TARGET
 $(1)_OBJDIR := .obj/$(1)
 $(1)_OBJS   := $$(addprefix .obj/$(1)/,$$(patsubst %.cpp,%.o,$(2)))
 
-.obj/$(1)/%.o: %.cpp
+.obj/$(1)/%.o: %.cpp Makefile
 	@mkdir -p $$(@D)
 	$$(CXX) $(3) $$(EXTRA_FLAGS) $$(DEFS) $(4) -Wall -MMD -MP $$(INC) $(5) -c -o $$@ $$<
 
@@ -429,25 +436,34 @@ libhisat2lib.so: $(HT2LIB_SHARED_RELEASE_OBJS)
 	$(CXX) $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall  $(INC) $(SEARCH_INC)\
 	-shared -o $@ $(HT2LIB_SHARED_RELEASE_OBJS) $(LIBS) $(SRA_LIB) $(SEARCH_LIBS)
 	
-.ht2lib-obj-debug/%.o: %.cpp
+# The library objects get the same -MMD -MP and Makefile prerequisite as the
+# binary ones. They had neither, so a header edit left libhisat2lib.a stale
+# while the binaries rebuilt correctly -- the two disagreeing about the same
+# source tree is worse than either being stale alone.
+.ht2lib-obj-debug/%.o: %.cpp Makefile
 	@mkdir -p $(dir $@)/$(dir $<)
-	$(CXX) -fPIC $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 -Wall $(INC) $(SEARCH_INC) \
-	-c -o $@ $< 
+	$(CXX) -fPIC $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 -Wall -MMD -MP $(INC) $(SEARCH_INC) \
+	-c -o $@ $<
 
-.ht2lib-obj-release/%.o: %.cpp
+.ht2lib-obj-release/%.o: %.cpp Makefile
 	@mkdir -p $(dir $@)/$(dir $<)
-	$(CXX) -fPIC $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall $(INC) $(SEARCH_INC) \
-	-c -o $@ $< 
+	$(CXX) -fPIC $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall -MMD -MP $(INC) $(SEARCH_INC) \
+	-c -o $@ $<
 
-.ht2lib-obj-debug-shared/%.o: %.cpp
+.ht2lib-obj-debug-shared/%.o: %.cpp Makefile
 	@mkdir -p $(dir $@)/$(dir $<)
-	$(CXX) -fPIC $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 -Wall $(INC) $(SEARCH_INC) \
-	-c -o $@ $< 
+	$(CXX) -fPIC $(DEBUG_FLAGS) $(DEBUG_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 -Wall -MMD -MP $(INC) $(SEARCH_INC) \
+	-c -o $@ $<
 
-.ht2lib-obj-release-shared/%.o: %.cpp
+.ht2lib-obj-release-shared/%.o: %.cpp Makefile
 	@mkdir -p $(dir $@)/$(dir $<)
-	$(CXX) -fPIC $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall $(INC) $(SEARCH_INC) \
-	-c -o $@ $< 
+	$(CXX) -fPIC $(RELEASE_FLAGS) $(RELEASE_DEFS) $(EXTRA_FLAGS) $(DEFS) $(SRA_DEF) -DBOWTIE2 $(NOASSERT_FLAGS) -Wall -MMD -MP $(INC) $(SEARCH_INC) \
+	-c -o $@ $<
+
+-include $(HT2LIB_DEBUG_OBJS:.o=.d)
+-include $(HT2LIB_RELEASE_OBJS:.o=.d)
+-include $(HT2LIB_SHARED_DEBUG_OBJS:.o=.d)
+-include $(HT2LIB_SHARED_RELEASE_OBJS:.o=.d)
 
 #
 # repeatexp
