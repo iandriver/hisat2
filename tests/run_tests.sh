@@ -301,7 +301,7 @@ else
     bad "unpaired alignment: ${urate}%"
 fi
 
-echo "== 9. the build reacts to header and flag changes =="
+echo "== 11. the build reacts to header and flag changes =="
 # Checked statically rather than by touching files: `touch Makefile` would force
 # every object of all seven targets to recompile for whoever runs the suite next.
 #
