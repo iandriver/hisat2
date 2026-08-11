@@ -524,9 +524,45 @@ private:
         int                          threads;
     };
     static void build_worker(void* vp);
+    // Reduce a window to k of its original variants, evenly spaced. Mirrors
+    // HGFM::selectAlts; the repeat index runs the same explosion retry.
+    static void selectAlts(WorkerParam& tParam,
+                           const EList<ALT<index_t> >& orig,
+                           index_t k);
 };
 
     
+// See HGFM::selectAlts. Kept as its own copy rather than shared, because the
+// two worker-parameter types are unrelated and threading a common helper between
+// them would mean a template shim for no benefit.
+template <typename index_t>
+void RFM<index_t>::selectAlts(typename RFM<index_t>::WorkerParam& tParam,
+                              const EList<ALT<index_t> >& orig,
+                              index_t k)
+{
+    const index_t n = (index_t)orig.size();
+    if(k > n) k = n;
+    tParam.alts.clear();
+    tParam.haplotypes.clear();
+    if(k == 0) return;
+    for(index_t i = 0; i < k; i++) {
+        tParam.alts.push_back(orig[(index_t)(((uint64_t)i * n) / k)]);
+    }
+    for(index_t a = 0; a < (index_t)tParam.alts.size(); a++) {
+        const ALT<index_t>& alt = tParam.alts[a];
+        if(!alt.snp()) continue;
+        tParam.haplotypes.expand();
+        tParam.haplotypes.back().left = alt.pos;
+        if(alt.deletion()) {
+            tParam.haplotypes.back().right = alt.pos + alt.len - 1;
+        } else {
+            tParam.haplotypes.back().right = alt.pos;
+        }
+        tParam.haplotypes.back().alts.clear();
+        tParam.haplotypes.back().alts.push_back(a);
+    }
+}
+
 template <typename index_t>
 void RFM<index_t>::build_worker(void* vp)
 {
@@ -545,6 +581,14 @@ void RFM<index_t>::build_worker(void* vp)
         assert(tParam.sa->suffixItrIsReset());
         assert_eq(tParam.sa->size(), tParam.s.length()+1);
     } else {
+        // Binary search for the largest variant subset that fits the edge
+        // budget, rather than halving until something does. See HGFM's copy for
+        // the measurement that motivates it: halving gives up roughly half a
+        // window's variants in one step when the window is typically only just
+        // over budget.
+        EList<ALT<index_t> > origAlts;
+        bool bsActive = false;
+        index_t bsLo = 0, bsHi = 0, bsCur = (index_t)tParam.alts.size();
         while(true) {
             tParam.rg = NULL, tParam.pg = NULL;
             bool exploded = false;
@@ -580,36 +624,38 @@ void RFM<index_t>::build_worker(void* vp)
                 }
                 exploded = tParam.pg->getNumEdges() > local_max_gbwt;
             }
-            if(exploded) {
-                cerr << "Warning: a local graph exploded (offset: " << tParam.curr_sztot << ", length: " << tParam.local_sztot << ")" << endl;
-                
+            if(!exploded && bsActive && bsHi > bsLo + 1) {
+                // Fits, but a larger subset might too.
                 delete tParam.pg; tParam.pg = NULL;
                 delete tParam.rg; tParam.rg = NULL;
-                if(tParam.alts.size() <= 1) {
-                    tParam.alts.clear();
-                } else {
-                    for(index_t s = 2; s < tParam.alts.size(); s += 2) {
-                        tParam.alts[s >> 1] = tParam.alts[s];
-                    }
-                    tParam.alts.resize(tParam.alts.size() >> 1);
-                    tParam.haplotypes.clear();
-                    for(index_t a = 0; a < tParam.alts.size(); a++) {
-                        const ALT<index_t>& alt = tParam.alts[a];
-                        if(!alt.snp()) continue;
-                        tParam.haplotypes.expand();
-                        tParam.haplotypes.back().left = alt.pos;
-                        if(alt.deletion()) {
-                            tParam.haplotypes.back().right = alt.pos + alt.len - 1;
-                        } else {
-                            tParam.haplotypes.back().right = alt.pos;
-                        }
-                        tParam.haplotypes.back().alts.clear();
-                        tParam.haplotypes.back().alts.push_back(a);
-                    }
-                }
+                bsLo = bsCur;
+                bsCur = bsLo + (bsHi - bsLo) / 2;
+                RFM<index_t>::selectAlts(tParam, origAlts, bsCur);
                 continue;
             }
-            
+            if(exploded) {
+                cerr << "Warning: a local graph exploded (offset: " << tParam.curr_sztot << ", length: " << tParam.local_sztot << ")" << endl;
+
+                delete tParam.pg; tParam.pg = NULL;
+                delete tParam.rg; tParam.rg = NULL;
+                if(!bsActive) {
+                    origAlts.clear();
+                    for(index_t a = 0; a < (index_t)tParam.alts.size(); a++) {
+                        origAlts.push_back(tParam.alts[a]);
+                    }
+                    bsActive = true;
+                    bsLo = 0;
+                }
+                bsHi = bsCur;
+                if(bsHi <= bsLo + 1) {
+                    bsCur = bsLo;          // converged; bsLo is known to fit
+                } else {
+                    bsCur = bsLo + (bsHi - bsLo) / 2;
+                }
+                RFM<index_t>::selectAlts(tParam, origAlts, bsCur);
+                continue;
+            }
+
             break;
         }
     }

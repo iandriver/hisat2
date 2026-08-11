@@ -1808,9 +1808,51 @@ private:
         uint64_t                     nExploded;
     };
     static void gbwt_worker(void* vp);
+    // Reduce a window to k of its original variants, evenly spaced.
+    static void selectAlts(ThreadParam& tParam,
+                           const EList<ALT<index_t> >& orig,
+                           index_t k);
 };
 
     
+// Keep k of `orig`, spread evenly across the window rather than taken from one
+// end, so a reduced window stays uniformly covered instead of losing a
+// contiguous stretch. Picks for successive k are nested, which is what lets the
+// caller binary-search: a smaller k is always a subset of a larger one, so
+// "fits the edge budget" is monotone in k.
+//
+// The haplotypes are rebuilt as one alt each, which is what halving did too.
+// That was tested separately: carrying the real haplotype structure across the
+// retry instead moves retention by at most 0.4 points, because windows explode
+// ~1.2 times on average and so the retry path barely runs twice.
+template <typename index_t, typename local_index_t>
+void HGFM<index_t, local_index_t>::selectAlts(ThreadParam& tParam,
+                                              const EList<ALT<index_t> >& orig,
+                                              index_t k)
+{
+    const index_t n = (index_t)orig.size();
+    if(k > n) k = n;
+    tParam.alts.clear();
+    tParam.haplotypes.clear();
+    if(k == 0) return;
+    for(index_t i = 0; i < k; i++) {
+        tParam.alts.push_back(orig[(index_t)(((uint64_t)i * n) / k)]);
+    }
+    for(index_t a = 0; a < (index_t)tParam.alts.size(); a++) {
+        const ALT<index_t>& alt = tParam.alts[a];
+        if(!alt.snp()) continue;
+        tParam.haplotypes.expand();
+        tParam.haplotypes.back().left = alt.pos;
+        if(alt.deletion()) {
+            tParam.haplotypes.back().right = alt.pos + alt.len - 1;
+        } else {
+            tParam.haplotypes.back().right = alt.pos;
+        }
+        tParam.haplotypes.back().alts.clear();
+        tParam.haplotypes.back().alts.push_back(a);
+    }
+}
+
 template <typename index_t, typename local_index_t>
 void HGFM<index_t, local_index_t>::gbwt_worker(void* vp)
 {
@@ -1832,6 +1874,21 @@ void HGFM<index_t, local_index_t>::gbwt_worker(void* vp)
                 continue;
             }
         }
+        // Binary search for the largest variant subset this window's local graph
+        // can hold, instead of halving until something fits.
+        //
+        // Halving surrenders 50% of a window's variants per explosion, and
+        // measurement shows windows explode 1.15-1.38 times each -- so the first
+        // step almost always overshoots from "just over budget" to "fits
+        // easily", and everything past the overshoot is given up for nothing.
+        //
+        // The subset is nested (uniformly spaced picks from the original list),
+        // so "fits" is monotone in the size and a binary search is well defined:
+        // lo is the largest size known to fit, hi the smallest known to explode.
+        EList<ALT<index_t> > origAlts;   // ALT is POD, so this is a plain copy
+        bool bsActive = false;
+        index_t bsLo = 0, bsHi = 0, bsCur = (index_t)tParam.alts.size();
+        const index_t bsOrigN = (index_t)tParam.alts.size();
         while(true) {
             if(tParam.alts.empty()) {
                 KarkkainenBlockwiseSA<SString<char> > bsa(
@@ -1883,40 +1940,50 @@ void HGFM<index_t, local_index_t>::gbwt_worker(void* vp)
                     }
                     exploded = tParam.pg->getNumEdges() > local_max_gbwt;
                 }
+                if(!exploded && bsActive && bsHi > bsLo + 1) {
+                    // Fits, but a larger subset might too. Discard and keep
+                    // searching upward; the graph is cheap next to the variants
+                    // that halving would have thrown away.
+                    delete tParam.pg; tParam.pg = NULL;
+                    delete tParam.rg; tParam.rg = NULL;
+                    bsLo = bsCur;
+                    bsCur = bsLo + (bsHi - bsLo) / 2;
+                    HGFM<index_t, local_index_t>::selectAlts(tParam, origAlts, bsCur);
+                    continue;
+                }
                 if(exploded) {
                     cerr << "Warning: a local graph exploded (offset: " << tParam.curr_sztot << ", length: " << tParam.local_sztot << ")" << endl;
 
                     delete tParam.pg; tParam.pg = NULL;
                     delete tParam.rg; tParam.rg = NULL;
                     tParam.nExploded++;
-                    const size_t altsBefore = tParam.alts.size();
-                    if(tParam.alts.size() <= 1) {
-                        tParam.alts.clear();
-                    } else {
-                        for(index_t s = 2; s < tParam.alts.size(); s += 2) {
-                            tParam.alts[s >> 1] = tParam.alts[s];
+                    if(!bsActive) {
+                        // First failure: remember the full set so any subset of
+                        // it can be reconstructed, and open the search.
+                        origAlts.clear();
+                        for(index_t a = 0; a < (index_t)tParam.alts.size(); a++) {
+                            origAlts.push_back(tParam.alts[a]);
                         }
-                        tParam.alts.resize(tParam.alts.size() >> 1);
-                        tParam.haplotypes.clear();
-                        for(index_t a = 0; a < tParam.alts.size(); a++) {
-                            const ALT<index_t>& alt = tParam.alts[a];
-                            if(!alt.snp()) continue;
-                            tParam.haplotypes.expand();
-                            tParam.haplotypes.back().left = alt.pos;
-                            if(alt.deletion()) {
-                                tParam.haplotypes.back().right = alt.pos + alt.len - 1;
-                            } else {
-                                tParam.haplotypes.back().right = alt.pos;
-                            }
-                            tParam.haplotypes.back().alts.clear();
-                            tParam.haplotypes.back().alts.push_back(a);
-                        }
+                        bsActive = true;
+                        bsLo = 0;
                     }
-                    tParam.altsDropped += (uint64_t)(altsBefore - tParam.alts.size());
+                    bsHi = bsCur;
+                    if(bsHi <= bsLo + 1) {
+                        // Converged. bsLo is known to fit; rebuild there and take it.
+                        bsCur = bsLo;
+                    } else {
+                        bsCur = bsLo + (bsHi - bsLo) / 2;
+                    }
+                    HGFM<index_t, local_index_t>::selectAlts(tParam, origAlts, bsCur);
                     continue;
                 }
             }
             break;
+        }
+        // Counted once, on the subset finally accepted. Accumulating per
+        // explosion would double-count, because the search revisits sizes.
+        if(bsActive) {
+            tParam.altsDropped = (uint64_t)(bsOrigN - (index_t)tParam.alts.size());
         }
         tParam.done = true;
         if(tParam.mainThread) break;
