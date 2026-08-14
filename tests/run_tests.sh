@@ -236,6 +236,67 @@ PYEOF
         nonint=$((nonint + c))
     done
     if [ $nonint -eq 0 ]; then ok "count matrices are integer"; else bad "$nonint non-integer matrices/values"; fi
+
+    # Gene and GeneFull from a single alignment pass.
+    #
+    # STARsolo and rustar take --soloFeatures Gene GeneFull and produce both
+    # from one pass; doing it in two costs ~1.9x here (measured on 111,600
+    # reads), because everything expensive -- alignment, CIGAR, reference
+    # blocks -- is shared and only the interval query repeats.
+    #
+    # The check that matters is not that both directories appear but that each
+    # matrix is byte-identical to the one a single-feature run produces. A
+    # shared pass that quietly counted a read under the wrong feature, or let
+    # one feature's state leak into the other, would still produce two
+    # plausible matrices.
+    # The generated model is one gene whose single exon spans the whole
+    # reference, so Gene and GeneFull are equal there by construction and every
+    # check below would pass even if the two features were swapped. Punch an
+    # intron through the exon union, inside the ~11 kb the reads occupy, so the
+    # features actually differ (69 vs 95 UMIs as written).
+    awk -F'\t' 'BEGIN{OFS="\t"} /^#/{print;next} $1=="G"{print;next}
+                $1=="E"{print "E",$2,$3,0,5000; print "E",$2,$3,8000,1000000; next} {print}' \
+        "$SC/model.ht2gm" > "$SC/model_intron.ht2gm"
+    for spec in Gene GeneFull Gene,GeneFull GeneFull,Gene; do
+        ./hisat2 -x $IDX -U "$SC/reads.fq" --solo-cb-in-readname \
+            --solo-cb-whitelist "$SC/whitelist.txt" --gene-annotation "$SC/model_intron.ht2gm" \
+            --gene-strand Unstranded --gene-feature "$spec" \
+            --solo-out-dir "$SC/ff_$(echo "$spec" | tr ',' '_')" \
+            -p 4 -S /dev/null > /dev/null 2>&1
+    done
+    if [ -d "$SC/ff_Gene_GeneFull/Gene" ] && [ -d "$SC/ff_Gene_GeneFull/GeneFull" ]; then
+        ok "one pass writes both Gene and GeneFull"
+    else
+        bad "--gene-feature Gene,GeneFull did not write both features"
+    fi
+    ffdiff=0
+    for f in Gene GeneFull; do
+        for m in matrix.mtx barcodes.tsv features.tsv; do
+            cmp -s "$SC/ff_$f/$f/raw/$m" "$SC/ff_Gene_GeneFull/$f/raw/$m" || ffdiff=$((ffdiff+1))
+        done
+    done
+    if [ $ffdiff -eq 0 ]; then
+        ok "combined-pass matrices are identical to single-feature runs"
+    else
+        bad "$ffdiff combined-pass outputs differ from their single-feature run"
+    fi
+    if cmp -s "$SC/ff_Gene_GeneFull/Gene/raw/matrix.mtx" \
+              "$SC/ff_GeneFull_Gene/Gene/raw/matrix.mtx"; then
+        ok "output does not depend on the order features are listed"
+    else
+        bad "--gene-feature Gene,GeneFull differs from GeneFull,Gene"
+    fi
+    # sum(Gene) < sum(GeneFull), strictly: a read inside the exon union is
+    # inside the body, and with the intron above some reads are body-only.
+    # Requiring strict inequality is what keeps the comparison above honest --
+    # if these two ever came out equal the identity checks would be vacuous.
+    g=$(awk 'NR>3{s+=$3} END{print s+0}' "$SC/ff_Gene_GeneFull/Gene/raw/matrix.mtx")
+    gf=$(awk 'NR>3{s+=$3} END{print s+0}' "$SC/ff_Gene_GeneFull/GeneFull/raw/matrix.mtx")
+    if [ "$g" -lt "$gf" ]; then
+        ok "sum(Gene) < sum(GeneFull) ($g < $gf), so the features are distinguishable"
+    else
+        bad "Gene and GeneFull agree ($g vs $gf) -- the identity checks above prove nothing"
+    fi
 else
     bad "could not generate single-cell test data"
 fi
