@@ -362,7 +362,56 @@ else
     bad "unpaired alignment: ${urate}%"
 fi
 
-echo "== 11. the build reacts to header and flag changes =="
+echo "== 11. hisat2_index_probe.py predicts what a build will do =="
+# The probe exists because both of hisat2-build's failure modes are cheap to
+# foresee and expensive to discover: overrunning the 2^32 node bound, and
+# silently dropping variants from over-budget local graphs.
+#
+# The bounds it reads must stay in step with hier_idx_common.h -- if those
+# constants change and the probe does not, it keeps answering confidently and
+# wrongly, which is worse than not having it.
+PSNP="$TMP/probe.snp"; PHAP="$TMP/probe.haplotype"; PFAI="$TMP/probe.fai"
+printf 'chr1\t1000000\t0\t60\t61\n' > "$PFAI"
+: > "$PSNP"; : > "$PHAP"
+# 600 variants inside one 57,344 bp window: over any plausible capacity, so the
+# probe must call it at risk. 20 more spread across the rest, which are not.
+for i in $(seq 1 600); do
+    printf 'rs%d\tsingle\tchr1\t%d\tA\n' "$i" "$((1000 + i * 20))" >> "$PSNP"
+    printf 'ht%d\tchr1\t%d\t%d\trs%d\n' "$i" "$((1000 + i * 20))" "$((1000 + i * 20))" "$i" >> "$PHAP"
+done
+for i in $(seq 601 620); do
+    printf 'rs%d\tsingle\tchr1\t%d\tA\n' "$i" "$((200000 + i * 500))" >> "$PSNP"
+    printf 'ht%d\tchr1\t%d\t%d\trs%d\n' "$i" "$((200000 + i * 500))" "$((200000 + i * 500))" "$i" >> "$PHAP"
+done
+if python3 hisat2_index_probe.py --fai "$PFAI" --snp "$PSNP" --haplotype "$PHAP" \
+        > "$TMP/probe.out" 2>&1; then
+    ok "probe runs and reports a verdict"
+else
+    bad "probe exited non-zero on a small genome that should fit"
+fi
+if grep -q "windows over the budget      1" "$TMP/probe.out"; then
+    ok "probe flags the one over-dense window and not the sparse ones"
+else
+    bad "probe did not identify the crowded window: $(grep -c . "$TMP/probe.out") lines"
+fi
+# A 1 Mb reference is 0.02% of the 32-bit ceiling, so it must not be called at risk.
+if grep -q "fits -- chr1 built comfortably" "$TMP/probe.out"; then
+    ok "probe passes a small reference on the global bound"
+else
+    bad "probe misjudged the global bound on a 1 Mb reference"
+fi
+# The whole point is that these track the builder. Compare against the header.
+for c in "LOCAL_INDEX_SIZE:local_index_size" "LOCAL_MAX_GBWT:local_max_gbwt"; do
+    pv=$(sed -n "s/^${c%%:*} = \(.*\)  *#.*/\1/p" hisat2_index_probe.py | head -1 | tr -d ' ')
+    hv=$(sed -n "s/^static const uint32_t ${c##*:} = \(.*\);.*/\1/p" hier_idx_common.h | tr -d ' ')
+    if [ -n "$pv" ] && [ "$pv" = "$hv" ]; then
+        ok "${c%%:*} matches hier_idx_common.h ($hv)"
+    else
+        bad "${c%%:*} is '$pv' but hier_idx_common.h says '$hv'"
+    fi
+done
+
+echo "== 12. the build reacts to header and flag changes =="
 # Checked statically rather than by touching files: `touch Makefile` would force
 # every object of all seven targets to recompile for whoever runs the suite next.
 #
