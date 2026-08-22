@@ -89,6 +89,26 @@ data used below, `Reverse` gives 46.0% of reads assigned to a gene and
 anyway. The correct value depends on chemistry and on which mate you pass
 first, so determine it empirically on a subset.
 
+**Filter your annotation, or lose ~10% of your reads.** A gene model built
+straight from a full GENCODE GTF makes reads ambiguous wherever annotated genes
+overlap — readthrough transcripts, nested lncRNAs, and the like — and the
+default `--solo-multi-mappers Unique` then discards them. Measured on 10x PBMC
+1k v3 (66.6M read pairs, GRCh38):
+
+| gene model | reads multi-gene, discarded | reads in a unique gene | total UMIs |
+|---|---|---|---|
+| full GENCODE v50 (78,941 genes) | **10.04%** | 44.10% | 9,130,654 |
+| CellRanger gene set (32,364 genes) | **1.58%** | 48.24% | 9,558,062 |
+
+This is why CellRanger and similar pipelines ship a *filtered* reference rather
+than the raw GENCODE release. Restricting the GTF to a curated gene set before
+running `hisat2_extract_genes.py` costs nothing and recovers those reads; the
+alternative is `--solo-multi-mappers EM`, which redistributes them instead.
+
+Like a wrong `--gene-strand`, this failure is silent: the matrix is well formed,
+the run reports no error, and only the `Reads Multi-Gene` line in `Summary.csv`
+shows what happened. Check it.
+
 **Use `--solo-multi-mappers EM` if you care about gene families.** The default
 discards reads compatible with more than one gene, which for near-identical
 paralogues means discarding most of the signal. Measured against STARsolo:
@@ -102,7 +122,7 @@ paralogues means discarding most of the signal. Measured against STARsolo:
 Ribosomal proteins, haemoglobins and other duplicated families are affected.
 EM recovers about 10% more molecules overall (395,354 on a 10M-read run).
 
-## Concordance with STARsolo
+## Concordance with STARsolo (mouse)
 
 Both tools were run on the same 10M reads from a 5' GEM-X mouse PBMC sample
 against GRCm39. Reproduce with `tests/solo_concordance.py`.
@@ -137,6 +157,54 @@ than misassignment.
 **On cell calling.** The 14 disagreeing barcodes all carry 373–396 UMIs against
 a median of 760 for called cells: they sit exactly at the knee, where a small
 difference in totals tips a barcode either way.
+
+## Concordance with CellRanger (human)
+
+The section above is mouse. On human, the comparator is CellRanger's own
+published output for 10x PBMC 1k v3 (66.6M read pairs, GRCh38, `grch38_snp`
+graph index). CellRanger uses STAR internally, so this stands in for a STARsolo
+run. Annotation was restricted to CellRanger's own gene ids so that the gene
+model is not a variable.
+
+| Measure | Result |
+|---|---|
+| **Called-cell overlap** | **Jaccard 0.9185** (1,127 shared of 1,132 / 1,222) |
+| **Per-cell total UMI** | **r = 0.9950** (Spearman 0.9941) |
+| Per-gene total UMI | r = 0.9550 (Spearman 0.9552) |
+| Genes within 2× | 94.4% (10,505 of 11,123 with ≥ 50 UMIs) |
+| Total UMIs on shared cells | 8,618,514 vs 9,130,347 (0.944×) |
+| Overall alignment rate | 87.20% |
+
+Two sources of disagreement, neither a misassignment:
+
+**Annotation drift.** CellRanger 3.0.0 is built on GENCODE v28. Gene ids are not
+stable in meaning across seven years of releases — `CAST` (ENSG00000153113) is
+the clearest case, where v50 carries an lncRNA at `5:95,962,001-96,631,085` and
+the protein-coding gene at `96,247,756-96,779,595`. Matching gene *ids* does not
+match their *coordinates*.
+
+**Pseudogenes inside annotated exons.** `OLFM3` scores 12,992 UMIs here against
+CellRanger's 0, which is impossible for a brain-specific gene in PBMCs. The
+cause is `RPSAP19`, a processed pseudogene of the highly expressed ribosomal
+protein gene RPSA, lying at `1:101,786,340-101,787,219` — entirely inside
+OLFM3's first exon. It is in neither reference, so reads from RPSA that land on
+it have only OLFM3 to be assigned to; STAR discards them as multimappers.
+
+This is the same mechanism behind the paralogue families in the mouse table
+above, and it is the strongest argument for `--solo-multi-mappers EM` on any
+sample where ribosomal-protein genes matter.
+
+### Memory, on human
+
+| | HISAT2-solo (graph) | STAR (linear) |
+|---|---|---|
+| index on disk | **6.5 GB** | 29 GB |
+| peak RSS while mapping | **9.0–9.4 GB** | 31.3 GB |
+
+Note the direction of the trade: HISAT2's index is 4.5× smaller and needs ~3.4×
+less RAM, but a human *graph* index cannot practically be built — use the
+prebuilt one. STAR's is larger and slower to build, and you can rebuild it for
+any assembly you like.
 
 ## Variant-aware single-cell
 
