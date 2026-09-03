@@ -381,6 +381,47 @@ else
     bad "UMI collapsing unit test failed"
 fi
 
+# A processed retrogene is a copy of the mature mRNA, so a read spanning the
+# parent's junction aligns spliced to the parent AND contiguously to the
+# retrogene at the same raw score. The counter must rank candidates the way
+# selectByScore does (hisat2_score, not the raw score) or every such read looks
+# multi-gene and is thrown away -- which cost Rps27 97% of its UMIs on real
+# mouse data before this was fixed.
+RG="$TMP/retro"
+if python3 tests/make_retrogene_reads.py --fasta example/reference/22_20-21M.fa \
+        --outdir "$RG" > /dev/null 2>&1 && \
+   ./hisat2-build -q "$RG/ref.fa" "$RG/idx" > /dev/null 2>&1; then
+    ./hisat2 -x "$RG/idx" -U "$RG/reads.fq" --solo-cb-in-readname \
+        --solo-cb-whitelist "$RG/whitelist.txt" --gene-annotation "$RG/model.ht2gm" \
+        --known-splicesite-infile "$RG/splicesites.txt" --solo-cell-filter None \
+        --solo-out-dir "$RG/Solo.out" -p 4 -S /dev/null > /dev/null 2>&1
+    MTX="$RG/Solo.out/Gene/raw/matrix.mtx"
+    if [ -f "$MTX" ]; then
+        ok "retrogene reads are counted, not discarded as multi-gene"
+    else
+        bad "retrogene reads were all discarded (no matrix written)"
+    fi
+    if [ -f "$MTX" ]; then
+        # Gene 0 (row 1) is the parent; the retrogene is row 2 and must stay empty,
+        # because the aligner reports only the spliced parent alignment.
+        PAR=$(awk 'NR>3 && $1==1{s+=$3} END{print s+0}' "$MTX")
+        RET=$(awk 'NR>3 && $1==2{s+=$3} END{print s+0}' "$MTX")
+        if [ "$PAR" -gt 0 ] && [ "$RET" -eq 0 ]; then
+            ok "junction reads go to the parent gene, not its retrogene ($PAR vs $RET)"
+        else
+            bad "retrogene split wrong: parent=$PAR retro=$RET"
+        fi
+        MG=$(awk -F, '/Reads Multi-Gene/{print $2}' "$RG/Solo.out/Gene/Summary.csv")
+        if [ "$MG" = "0.000000" ]; then
+            ok "no read is misclassified multi-gene by the retrogene copy"
+        else
+            bad "multi-gene fraction should be 0, got $MG"
+        fi
+    fi
+else
+    bad "could not build the retrogene fixture"
+fi
+
 echo "== 9. hisat2_filter_snps.py masks pseudogenes but spares real exons =="
 # A processed pseudogene lying across a real gene's exon (the DHFRP2/HLA-B case)
 # must not cost that exon its variants.

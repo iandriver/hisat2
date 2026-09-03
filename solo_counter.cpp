@@ -30,6 +30,7 @@
 
 #include "read.h"
 #include "aligner_result.h"
+#include <limits>
 
 namespace {
 
@@ -206,9 +207,24 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
 
     if(results == NULL || nresults == 0) { nUnmapped_++; return; }
 
-    // Union the gene assignments over every candidate alignment. If they all
-    // agree on one gene the read is unique-gene even when it is multi-locus,
-    // which is what STARsolo counts by default.
+    // Union the gene assignments over the candidate alignments the aligner
+    // would actually report. If they all agree on one gene the read is
+    // unique-gene even when it is multi-locus, which is what STARsolo counts.
+    //
+    // "Would actually report" is load-bearing. finishRead hands us every
+    // candidate, including ones selectByScore then discards, and ranking by
+    // the raw score alone does not reproduce its choice: a read spanning a
+    // junction aligns to its parent gene spliced AND to a processed retrogene
+    // contiguously, both at raw score 0. Ranking by hisat2_score() -- which
+    // packs the raw score above the repeat / known-transcript / splice-site /
+    // trim preferences (aligner_result.h calculate_hisat2_score) -- is what
+    // makes the spliced parent win, exactly as selectByScore does.
+    //
+    // Without this filter every ribosomal-protein read with a retrogene copy
+    // looked multi-gene and was discarded: Rps27 counted 258 UMIs against
+    // rustar's 9,293 on 10M mouse reads. We keep ALL candidates tied at the
+    // top rather than picking one, so selectByScore's random tiebreak still
+    // never influences a count.
     static thread_local std::vector<uint32_t> scratch, blockGenes;
     static thread_local std::vector<std::vector<uint32_t> > featGenes;
     static thread_local std::vector<uint32_t> bodyGenes, veloGenes, veloClasses;
@@ -224,8 +240,16 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     bool primeFw = false;
     int64_t primeL = 0, primeR = 0;
 
+    // Rank exactly as selectByScore does, then keep only the top group.
+    TAlScore bestScore = std::numeric_limits<TAlScore>::min();
+    for(size_t i = 0; i < nresults; i++) {
+        TAlScore h = (*results)[i].score().hisat2_score();
+        if(h > bestScore) bestScore = h;
+    }
+
     for(size_t i = 0; i < nresults; i++) {
         const AlnRes& rs = (*results)[i];
+        if(rs.score().hisat2_score() != bestScore) continue;
         // The CIGAR is the authoritative description of which reference bases
         // the alignment covers, and reusing it keeps the counting path exactly
         // consistent with the emitted GX:Z tag.
