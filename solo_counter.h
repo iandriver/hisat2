@@ -22,10 +22,13 @@
 
 #include <stdint.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "gene_model.h"
 #include "solo_barcode.h"
+#include "solo_umi.h"
+#include "solo_priming.h"
 
 #include "ds.h"
 #include "read.h"
@@ -53,14 +56,6 @@ enum SoloVeloClass {
     SOLO_VELO_AMBIGUOUS = 2
 };
 
-/** UMI collapsing rule. Names match STARsolo so results are comparable. */
-enum SoloUmiDedup {
-    SOLO_UMI_EXACT = 0,   // distinct UMI sequences
-    SOLO_UMI_1MM_CR,      // CellRanger: merge a UMI into a more abundant 1MM neighbour
-    SOLO_UMI_1MM_ALL,     // merge all UMIs within one mismatch (connected components)
-    SOLO_UMI_NODEDUP      // count reads, not UMIs
-};
-
 /**
  * One (cell, gene, UMI) observation. Exactly 16 bytes with no padding.
  *
@@ -73,10 +68,16 @@ struct SoloRec {
     uint32_t geneAndFlags;   // gene index in the low 28 bits
     uint64_t umi;            // 2-bit packed
 
-    // Velocyto class lives in the two bits above the gene index.
-    static const uint32_t kGeneMask  = 0x0fffffffu;
-    static const uint32_t kVeloShift = 28;
-    static const uint32_t kVeloMask  = 0x30000000u;
+    // Velocyto class lives in the two bits above the gene index; internal
+    // priming takes the next one up. Both ride along for free.
+    static const uint32_t kGeneMask   = 0x0fffffffu;
+    static const uint32_t kVeloShift  = 28;
+    static const uint32_t kVeloMask   = 0x30000000u;
+    static const uint32_t kPrimedBit  = 0x40000000u;
+    bool primed() const { return (geneAndFlags & kPrimedBit) != 0; }
+    void setPrimed(bool v) {
+        if(v) geneAndFlags |= kPrimedBit; else geneAndFlags &= ~kPrimedBit;
+    }
     uint32_t veloClass() const { return (geneAndFlags & kVeloMask) >> kVeloShift; }
     void setVeloClass(uint32_t c) {
         geneAndFlags = (geneAndFlags & ~kVeloMask) | ((c << kVeloShift) & kVeloMask);
@@ -177,6 +178,10 @@ public:
 
     friend class SoloCounter;
 
+    /** True if the genome just past an alignment's 3' end is A-rich. */
+    bool primedAt(const BitPairReference& ref,
+                  int32_t refid, int64_t leftmost, int64_t rightmost, bool fw);
+
     /**
      * Gene-assignment state for one requested feature (Gene, GeneFull, ...).
      *
@@ -202,6 +207,11 @@ private:
     uint64_t nReads_ = 0, nValidCB_ = 0, nAmbigCB_ = 0, nNoCB_ = 0;
     uint64_t nUnmapped_ = 0;
     uint64_t nRefObs_ = 0, nAltObs_ = 0;
+    uint64_t nPrimed_ = 0;          // reads whose 3' end sits on an A-rich window
+    uint64_t nPrimeChecked_ = 0;    // reads that reached a count, so were checked
+    // getStretch writes through these; they must not be shared between threads.
+    EList<uint32_t> primeBuf_;
+    ASSERT_ONLY(SStringExpandable<uint32_t> primeScratch_);
 };
 
 /** Owns configuration, merges the per-thread arenas, and writes the matrices. */
@@ -232,6 +242,15 @@ public:
     void setVariantIndex(const SoloVariantIndex* vi) { vi_ = vi; }
     /** Enables spliced/unspliced/ambiguous output. */
     void setVelocyto(bool v) { velocyto_ = v; }
+    /**
+     * Enables internal-priming detection. The reference must outlive the
+     * counter; without one the check is skipped rather than guessed at.
+     */
+    void setInternalPriming(bool on, const BitPairReference* ref) {
+        primingOn_ = on; ref_ = ref;
+    }
+    bool internalPriming() const { return primingOn_ && ref_ != NULL; }
+    const BitPairReference* reference() const { return ref_; }
     void setMultiMapper(SoloMultiMapper m) { multiMode_ = m; }
     SoloMultiMapper multiMapper() const { return multiMode_; }
     bool velocyto() const { return velocyto_; }
@@ -270,6 +289,12 @@ private:
                      const std::vector<uint32_t>& tally,
                      std::string& err) const;
     bool writeSummary(std::string& err) const;
+    /** Writes the reads-per-UMI histogram for the current feature. */
+    bool writeCloneHist(std::string& err) const;
+    /** Writes the same histogram split by gene-expression decile. */
+    bool writeCloneHistByExpr(std::string& err) const;
+    /** Writes the per-gene internal-priming table. */
+    bool writePriming(std::string& err) const;
     bool writeVelocyto(std::vector<SoloRec>& velo, std::string& err);
     bool writeMultiMatrix(const std::vector<SoloRec>& counts,
                           const std::vector<uint32_t>& tally,
@@ -291,6 +316,8 @@ private:
     const SoloParams*    params_;
     const SoloVariantIndex* vi_;
     bool velocyto_ = false;
+    bool primingOn_ = false;
+    const BitPairReference* ref_ = NULL;
     SoloMultiMapper multiMode_ = SOLO_MULTI_UNIQUE;
     std::vector<GeneFeature> features_;
     size_t      curFeat_ = 0;
@@ -313,6 +340,26 @@ private:
     uint64_t nCalledCells_ = 0, nUMIsInCells_ = 0;
     uint64_t nSpliced_ = 0, nUnspliced_ = 0, nAmbiguous_ = 0;
     uint64_t nMultiUMIs_ = 0;
+
+    // Reads-per-UMI distributions for the feature being written: every
+    // barcode, and called cells alone. Ambient barcodes are overwhelmingly
+    // single-read molecules and would bury the tail that matters, so the two
+    // are kept apart rather than summed.
+    SoloCloneHist cloneAll_, cloneCell_;
+
+    // The same distribution for called cells, split by how much of the
+    // library a molecule's gene accounts for. A heavy tail confined to the
+    // first decile is a handful of very highly expressed genes; one spread
+    // across every decile is a property of the chemistry.
+    static const size_t kDeciles = 10;
+    std::vector<SoloCloneHist> cloneByDecile_;
+    std::vector<uint64_t> decileGenes_, decileUmis_;
+
+    // Internal priming, per feature: reads seen by the check, reads called,
+    // and the same at the molecule level plus a per-gene breakdown.
+    uint64_t nPrimedReads_ = 0, nPrimeChecked_ = 0;
+    uint64_t nPrimedUmis_ = 0;
+    std::vector<uint64_t> genePrimedUmis_, geneUmis_;
 };
 
 #endif /* SOLO_COUNTER_H_ */

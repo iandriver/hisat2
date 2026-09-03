@@ -39,23 +39,31 @@ bool byCbUmiGene(const SoloRec& a, const SoloRec& b) {
     return a.gene() < b.gene();
 }
 
+/**
+ * One molecule after multi-gene resolution, with the reads behind it.
+ *
+ * Resolution collapses a (cell, UMI) run to a single record, so without this
+ * the read counts would be gone by the time deduplication needs them -- and
+ * 1MM_CR, whose whole rule is "merge the less-supported UMI into the better
+ * supported one", would silently decide every case on array position instead.
+ * There is one of these per molecule rather than per read, so the extra field
+ * costs far less than it would inside SoloRec.
+ */
+struct ResolvedRec {
+    SoloRec  rec;
+    uint32_t reads;
+};
+
+bool byCbGeneUmiR(const ResolvedRec& a, const ResolvedRec& b) {
+    if(a.rec.cb != b.rec.cb)         return a.rec.cb < b.rec.cb;
+    if(a.rec.gene() != b.rec.gene()) return a.rec.gene() < b.rec.gene();
+    return a.rec.umi < b.rec.umi;
+}
+
 bool byCbGeneUmi(const SoloRec& a, const SoloRec& b) {
     if(a.cb != b.cb)             return a.cb < b.cb;
     if(a.gene() != b.gene())     return a.gene() < b.gene();
     return a.umi < b.umi;
-}
-
-/** True if two packed UMIs of the given length differ at exactly one base. */
-inline bool umiWithin1(uint64_t a, uint64_t b, int len) {
-    uint64_t x = a ^ b;
-    if(x == 0) return false;
-    int diffs = 0;
-    for(int i = 0; i < len; i++) {
-        if((x >> (2 * i)) & 3ull) {
-            if(++diffs > 1) return false;
-        }
-    }
-    return diffs == 1;
 }
 
 bool makeDir(const std::string& path) {
@@ -147,6 +155,39 @@ void SoloCounter::reserveThreads(size_t n) {
     for(size_t i = threads_.size(); i < n; i++) threads_.push_back(new SoloCounterThread(this));
 }
 
+/**
+ * Reads the genome just past an alignment's 3' end and asks whether it looks
+ * like an oligo(dT) mispriming site.
+ *
+ * "Past the 3' end" is in the read's own orientation: forward alignments look
+ * rightward and count A, reverse ones look leftward and count T, because the
+ * transcript's A's are the reference's T's on that strand. A window running off
+ * the end of a contig is judged on what is there.
+ */
+bool SoloCounterThread::primedAt(const BitPairReference& ref,
+                                 int32_t refid, int64_t leftmost, int64_t rightmost,
+                                 bool fw) {
+    if(refid < 0) return false;
+    const int64_t reflen = (int64_t)ref.approxLen((TIndexOffU)refid);
+    int64_t from, to;
+    if(fw) { from = rightmost;          to = from + kPrimeWindow; }
+    else   { to   = leftmost;           from = to - kPrimeWindow; }
+    if(from < 0) from = 0;
+    if(to > reflen) to = reflen;
+    const int64_t n = to - from;
+    if(n <= 0) return false;
+
+    primeBuf_.resize((size_t)((n + 16 + 3) / 4) + 1);
+    int off = ref.getStretch(
+        primeBuf_.ptr(),
+        (size_t)refid,
+        (size_t)from,
+        (size_t)n
+        ASSERT_ONLY(, primeScratch_));
+    const char* w = (const char*)primeBuf_.ptr() + off;
+    return soloIsPrimingWindow(w, (size_t)n, fw ? 0 : 3);
+}
+
 void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
                                 size_t nresults) {
     const SoloCounter* p = parent_;
@@ -177,6 +218,11 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     if(featGenes.size() < nfeat) featGenes.resize(nfeat);
     for(size_t fi = 0; fi < nfeat; fi++) featGenes[fi].clear();
     veloGenes.clear(); veloClasses.clear();
+    // -1 until the genome has been consulted; see the deferred check below.
+    int  primedRead = -1;
+    int32_t primeRef = -1;
+    bool primeFw = false;
+    int64_t primeL = 0, primeR = 0;
 
     for(size_t i = 0; i < nresults; i++) {
         const AlnRes& rs = (*results)[i];
@@ -208,6 +254,16 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         }
         if(haveBlock) blocks.push_back(std::make_pair(blockStart, pos));
         if(blocks.empty()) continue;
+
+        // Remember where the first (best) alignment ends. The check itself is
+        // deferred: reading the genome there costs a random access into three
+        // gigabytes, and better than half of all reads never reach a count.
+        if(i == 0 && p->internalPriming()) {
+            primeRef = (int32_t)rs.refid();
+            primeFw  = rs.fw();
+            primeL   = blocks.front().first;
+            primeR   = blocks.back().second;
+        }
 
         // One interval query per requested feature. The blocks above are what
         // cost anything to produce, and they are shared.
@@ -327,10 +383,15 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         }
 
         fa.nCounted++;
+        if(primedRead < 0 && p->internalPriming() && primeRef >= 0) {
+            nPrimeChecked_++;
+            primedRead = primedAt(*p->reference(), primeRef, primeL, primeR, primeFw) ? 1 : 0;
+            if(primedRead) nPrimed_++;
+        }
         if(sr.status == SOLO_CB_AMBIG) {
             SoloAmbigRec ar;
             ar.cbRaw = sr.cbPacked;
-            ar.geneAndFlags = genes[0];
+            ar.geneAndFlags = genes[0] | (primedRead > 0 ? SoloRec::kPrimedBit : 0u);
             ar.umi = sr.umiPacked;
             fa.ambig.push_back(ar);
         } else {
@@ -338,6 +399,7 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
             r.cb = sr.cbIdx;
             r.geneAndFlags = genes[0];
             r.umi = sr.umiPacked;
+            r.setPrimed(primedRead > 0);
             fa.recs.push_back(r);
         }
     }
@@ -357,6 +419,7 @@ bool SoloCounter::finalize(std::string& err) {
         velo.insert(velo.end(), t->velo_.begin(), t->velo_.end());
         nRefObs_ += t->nRefObs_; nAltObs_ += t->nAltObs_;
         nReads_ += t->nReads_; nValidCB_ += t->nValidCB_; nAmbigCB_ += t->nAmbigCB_;
+        nPrimedReads_ += t->nPrimed_; nPrimeChecked_ += t->nPrimeChecked_;
         nNoCB_ += t->nNoCB_;   nUnmapped_ += t->nUnmapped_;
         std::vector<SoloAllelicRec>().swap(t->allelic_);
         std::vector<SoloRec>().swap(t->velo_);
@@ -387,6 +450,13 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
     nNoGene_ = nMultiGene_ = nCounted_ = 0;
     nUMIs_ = nCells_ = nGenesDetected_ = 0;
     nCalledCells_ = nUMIsInCells_ = nMultiUMIs_ = nAmbigResolved_ = 0;
+    cloneAll_.clear(); cloneCell_.clear();
+    cloneByDecile_.assign(kDeciles, SoloCloneHist());
+    nPrimedUmis_ = 0;
+    genePrimedUmis_.assign(gm_ != NULL ? gm_->numGenes() : 0, 0);
+    geneUmis_.assign(gm_ != NULL ? gm_->numGenes() : 0, 0);
+    decileGenes_.assign(kDeciles, 0);
+    decileUmis_.assign(kDeciles, 0);
 
     std::vector<SoloRec> all;
     std::vector<SoloAmbigRec> ambig;
@@ -459,7 +529,7 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
     // collision. CellRanger gives it to whichever gene has more reads and
     // discards it on a tie.
     std::sort(all.begin(), all.end(), byCbUmiGene);
-    std::vector<SoloRec> resolved;
+    std::vector<ResolvedRec> resolved;
     resolved.reserve(all.size());
     size_t i = 0;
     while(i < all.size()) {
@@ -478,9 +548,13 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
             k = m;
         }
         if(!tie) {
-            SoloRec r = all[i];
-            r.setGene(bestGene);
-            resolved.push_back(r);
+            ResolvedRec rr;
+            rr.rec = all[i];
+            rr.rec.setGene(bestGene);
+            // Every read in the run came off the same molecule, including any
+            // that favoured a losing gene, so they all count towards its depth.
+            rr.reads = (uint32_t)(j - i);
+            resolved.push_back(rr);
         } else {
             nMultiGene_++;
         }
@@ -489,59 +563,70 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
     std::vector<SoloRec>().swap(all);
 
     // UMI collapsing within each (cell, gene).
-    std::sort(resolved.begin(), resolved.end(), byCbGeneUmi);
+    std::sort(resolved.begin(), resolved.end(), byCbGeneUmiR);
     std::vector<SoloRec> counts;    // one entry per (cell, gene)
     std::vector<uint32_t> tally;    // its UMI count
+    std::vector<uint32_t> clones;   // reads per surviving molecule, per block
+    std::vector<uint32_t> survivors;
+    std::vector<uint32_t> cloneArena, cloneOff, cloneN;   // the same, kept
     int umiLen = params_ != NULL ? params_->umiLen : 12;
 
     i = 0;
     while(i < resolved.size()) {
         size_t j = i;
-        while(j < resolved.size() && resolved[j].cb == resolved[i].cb &&
-              resolved[j].gene() == resolved[i].gene()) j++;
+        while(j < resolved.size() && resolved[j].rec.cb == resolved[i].rec.cb &&
+              resolved[j].rec.gene() == resolved[i].rec.gene()) j++;
 
         // Distinct UMIs in this block, with read support.
         std::vector<uint64_t> umis;
         std::vector<uint32_t> reads;
+        static thread_local std::vector<char> primedFlag;
+        primedFlag.clear();
+        uint64_t blockReads = 0;
         for(size_t k = i; k < j; ) {
             size_t m = k;
-            while(m < j && resolved[m].umi == resolved[k].umi) m++;
-            umis.push_back(resolved[k].umi);
-            reads.push_back((uint32_t)(m - k));
+            uint32_t nr = 0;
+            bool pr = false;
+            while(m < j && resolved[m].rec.umi == resolved[k].rec.umi) {
+                nr += resolved[m].reads; pr = pr || resolved[m].rec.primed(); m++;
+            }
+            umis.push_back(resolved[k].rec.umi);
+            reads.push_back(nr);
+            primedFlag.push_back(pr ? 1 : 0);
+            blockReads += nr;
             k = m;
         }
 
+        soloUmiClones(umis, reads, dedup_, umiLen, clones, &survivors);
+        if(primingOn_) {
+            const uint32_t g = resolved[i].rec.gene();
+            for(size_t x = 0; x < survivors.size(); x++) {
+                if(!primedFlag[survivors[x]]) continue;
+                nPrimedUmis_++;
+                if(g < genePrimedUmis_.size()) genePrimedUmis_[g]++;
+            }
+            if(g < geneUmis_.size()) geneUmis_[g] += clones.size();
+        }
+
+        // Every mode but NODEDUP counts molecules; NODEDUP counts their reads.
         uint32_t n = 0;
         if(dedup_ == SOLO_UMI_NODEDUP) {
-            n = (uint32_t)(j - i);
-        } else if(dedup_ == SOLO_UMI_EXACT) {
-            n = (uint32_t)umis.size();
+            n = (uint32_t)blockReads;
         } else {
-            // Blocks are tiny (a handful of UMIs per gene per cell), so the
-            // quadratic neighbour search here is cheaper than building an index.
-            std::vector<char> merged(umis.size(), 0);
-            for(size_t a = 0; a < umis.size(); a++) {
-                if(merged[a]) continue;
-                for(size_t b = 0; b < umis.size(); b++) {
-                    if(a == b || merged[b]) continue;
-                    if(!umiWithin1(umis[a], umis[b], umiLen)) continue;
-                    if(dedup_ == SOLO_UMI_1MM_ALL) {
-                        if(b > a) merged[b] = 1;
-                    } else {
-                        // 1MM_CR: the less-supported UMI is assumed to be a
-                        // sequencing error of the more-supported one.
-                        if(reads[b] < reads[a] || (reads[b] == reads[a] && b > a)) merged[b] = 1;
-                    }
-                }
-            }
-            for(size_t a = 0; a < umis.size(); a++) if(!merged[a]) n++;
+            n = (uint32_t)clones.size();
         }
 
         if(n > 0) {
-            SoloRec r = resolved[i];
-            counts.push_back(r);
+            counts.push_back(resolved[i].rec);
             tally.push_back(n);
             nUMIs_ += n;
+            // Clone sizes are binned once cell calling has run, so park them
+            // in a flat arena keyed by position in counts. One uint32 per
+            // molecule, which is an order of magnitude smaller than the
+            // per-read records already held.
+            cloneOff.push_back((uint32_t)cloneArena.size());
+            cloneN.push_back((uint32_t)clones.size());
+            cloneArena.insert(cloneArena.end(), clones.begin(), clones.end());
         }
         i = j;
     }
@@ -572,11 +657,13 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
 
     if(!writeMatrix(counts, tally, err)) return false;
 
+    // Which barcodes are cells is needed both by the filtered matrix and by
+    // the clone-size histogram below, so it is decided once here.
+    std::vector<char> isCell(wl_->size(), 0);
     if(filter_ != SOLO_FILTER_NONE) {
         std::vector<uint32_t> called;
         callCells(counts, tally, called);
         nCalledCells_ = called.size();
-        std::vector<char> isCell(wl_->size(), 0);
         for(size_t i = 0; i < called.size(); i++) isCell[called[i]] = 1;
         for(size_t k = 0; k < counts.size(); k++)
             if(isCell[counts[k].cb]) nUMIsInCells_ += tally[k];
@@ -601,6 +688,58 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
             }
         }
     }
+
+    // Rank genes by how many molecules they hold in called cells, then cut
+    // them into deciles of molecule mass -- not of gene count, which would put
+    // nearly every molecule in one bin. The first decile is therefore the
+    // handful of genes carrying a tenth of the library.
+    const size_t nGenes = gm_ != NULL ? gm_->numGenes() : 0;
+    std::vector<uint8_t> geneDecile(nGenes, (uint8_t)(kDeciles - 1));
+    {
+        std::vector<uint64_t> geneUmis(nGenes, 0);
+        uint64_t totalUmis = 0;
+        for(size_t k = 0; k < counts.size(); k++) {
+            if(!isCell[counts[k].cb] && filter_ != SOLO_FILTER_NONE) continue;
+            geneUmis[counts[k].gene()] += tally[k];
+            totalUmis += tally[k];
+        }
+        std::vector<uint32_t> order;
+        order.reserve(nGenes);
+        for(size_t g = 0; g < nGenes; g++) if(geneUmis[g]) order.push_back((uint32_t)g);
+        std::sort(order.begin(), order.end(),
+                  [&geneUmis](uint32_t a, uint32_t b) {
+                      if(geneUmis[a] != geneUmis[b]) return geneUmis[a] > geneUmis[b];
+                      return a < b;   // stable across runs
+                  });
+        uint64_t seen = 0;
+        for(size_t idx = 0; idx < order.size(); idx++) {
+            size_t d = totalUmis ? (size_t)((double)seen * kDeciles / (double)totalUmis) : 0;
+            if(d >= kDeciles) d = kDeciles - 1;
+            geneDecile[order[idx]] = (uint8_t)d;
+            decileGenes_[d]++;
+            decileUmis_[d] += geneUmis[order[idx]];
+            seen += geneUmis[order[idx]];
+        }
+    }
+
+    // Bin the parked clone sizes now that cells are known, then release the
+    // arena before the multimapper pass allocates.
+    for(size_t k = 0; k < cloneOff.size(); k++) {
+        const bool cell = isCell[counts[k].cb] != 0;
+        const uint32_t g = counts[k].gene();
+        const uint8_t d = g < geneDecile.size() ? geneDecile[g] : (uint8_t)(kDeciles - 1);
+        for(uint32_t x = 0; x < cloneN[k]; x++) {
+            const uint32_t c = cloneArena[cloneOff[k] + x];
+            cloneAll_.add(c);
+            if(cell) { cloneCell_.add(c); cloneByDecile_[d].add(c); }
+        }
+    }
+    std::vector<uint32_t>().swap(cloneArena);
+    std::vector<uint32_t>().swap(cloneOff);
+    std::vector<uint32_t>().swap(cloneN);
+    if(!writeCloneHist(err)) return false;
+    if(!writeCloneHistByExpr(err)) return false;
+    if(!writePriming(err)) return false;
 
     if(!multi.empty() && !writeMultiMatrix(counts, tally, multi, multiGenes, err)) return false;
     if(!writeSummary(err)) return false;
@@ -1011,6 +1150,98 @@ bool SoloCounter::writeMatrix(const std::vector<SoloRec>& counts,
     return true;
 }
 
+bool SoloCounter::writeCloneHist(std::string& err) const {
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    std::string path = outDir_ + "/" + featName + "/UMIcloneSize.tsv";
+    std::ofstream o(path.c_str());
+    if(!o.good()) { err = "could not write " + path; return false; }
+
+    o << "# reads per UMI, over molecules surviving deduplication\n";
+    o << "# umis_all: every barcode.  umis_in_cells: called cells only"
+      << (filter_ == SOLO_FILTER_NONE ? " (no cell filter ran; column is zero)" : "")
+      << "\n";
+    o << "reads_per_umi\tumis_all\tumis_in_cells\n";
+
+    size_t upto = cloneAll_.bins.size();
+    if(cloneCell_.bins.size() > upto) upto = cloneCell_.bins.size();
+    for(size_t k = 1; k < upto; k++) {
+        uint64_t a = k < cloneAll_.bins.size()  ? cloneAll_.bins[k]  : 0;
+        uint64_t c = k < cloneCell_.bins.size() ? cloneCell_.bins[k] : 0;
+        if(a == 0 && c == 0) continue;   // the tail is sparse; skip empty bins
+        o << k << "\t" << a << "\t" << c << "\n";
+    }
+    // Clone sizes past the last exact bin are counted but not resolved.
+    if(cloneAll_.nOver > 0 || cloneCell_.nOver > 0) {
+        o << ">" << SoloCloneHist::kMaxBin << "\t"
+          << cloneAll_.nOver << "\t" << cloneCell_.nOver << "\n";
+    }
+    return true;
+}
+
+bool SoloCounter::writeCloneHistByExpr(std::string& err) const {
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    std::string path = outDir_ + "/" + featName + "/UMIcloneSizeByExpr.tsv";
+    std::ofstream o(path.c_str());
+    if(!o.good()) { err = "could not write " + path; return false; }
+
+    o << "# reads per UMI in called cells, split by gene-expression decile\n";
+    o << "# d1 holds the genes accounting for the first tenth of all molecules\n";
+    o << "# genes per decile:";
+    for(size_t d = 0; d < kDeciles; d++) o << " d" << (d + 1) << "=" << decileGenes_[d];
+    o << "\n# molecules per decile:";
+    for(size_t d = 0; d < kDeciles; d++) o << " d" << (d + 1) << "=" << decileUmis_[d];
+    o << "\nreads_per_umi";
+    for(size_t d = 0; d < kDeciles; d++) o << "\td" << (d + 1);
+    o << "\n";
+
+    size_t upto = 0;
+    for(size_t d = 0; d < kDeciles; d++)
+        if(cloneByDecile_[d].bins.size() > upto) upto = cloneByDecile_[d].bins.size();
+    for(size_t k = 1; k < upto; k++) {
+        uint64_t row = 0;
+        for(size_t d = 0; d < kDeciles; d++)
+            if(k < cloneByDecile_[d].bins.size()) row += cloneByDecile_[d].bins[k];
+        if(row == 0) continue;
+        o << k;
+        for(size_t d = 0; d < kDeciles; d++)
+            o << "\t" << (k < cloneByDecile_[d].bins.size() ? cloneByDecile_[d].bins[k] : 0);
+        o << "\n";
+    }
+    return true;
+}
+
+bool SoloCounter::writePriming(std::string& err) const {
+    if(!internalPriming()) return true;
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    std::string path = outDir_ + "/" + featName + "/InternalPriming.tsv";
+    std::ofstream o(path.c_str());
+    if(!o.good()) { err = "could not write " + path; return false; }
+
+    o << "# molecules whose 3' end sits on an A-rich genomic window ("
+      << kPrimeMinCount << "+ A in " << kPrimeWindow << " nt, or a run of "
+      << kPrimeMinRun << ")\n";
+    o << "# an oligo(dT) primer that annealed inside a transcript rather than to"
+         " its poly(A) tail\n";
+    o << "gene_id\tgene_name\tumis\tprimed_umis\tfraction\n";
+
+    // Ordered by molecule count: the genes worth looking at first are the ones
+    // carrying enough signal for the fraction to mean anything.
+    std::vector<uint32_t> order;
+    for(size_t g = 0; g < geneUmis_.size(); g++) if(geneUmis_[g]) order.push_back((uint32_t)g);
+    std::sort(order.begin(), order.end(), [this](uint32_t a, uint32_t b) {
+        if(geneUmis_[a] != geneUmis_[b]) return geneUmis_[a] > geneUmis_[b];
+        return a < b;
+    });
+    o.setf(std::ios::fixed); o.precision(4);
+    for(size_t k = 0; k < order.size(); k++) {
+        const uint32_t g = order[k];
+        o << gm_->geneId(g) << "\t" << gm_->geneName(g) << "\t"
+          << geneUmis_[g] << "\t" << genePrimedUmis_[g] << "\t"
+          << (double)genePrimedUmis_[g] / (double)geneUmis_[g] << "\n";
+    }
+    return true;
+}
+
 bool SoloCounter::writeSummary(std::string& err) const {
     const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
     std::string path = outDir_ + "/" + featName + "/Summary.csv";
@@ -1029,6 +1260,22 @@ bool SoloCounter::writeSummary(std::string& err) const {
     o << "Sequencing Saturation,"
       << (nCounted_ > 0 ? 1.0 - (double)nUMIs_ / (double)nCounted_ : 0.0) << "\n";
     o.unsetf(std::ios::fixed);
+    // Saturation is the mean of the reads-per-UMI distribution restated. These
+    // two describe its tail, which is where PCR-repriming artefacts show; the
+    // shape itself is in UMIcloneSize.tsv.
+    o << "UMI Clone Size P99," << cloneAll_.percentile(0.99) << "\n";
+    o << "UMI Clone Size Max," << cloneAll_.maxClone << "\n";
+    if(internalPriming()) {
+        o.setf(std::ios::fixed); o.precision(6);
+        o << "Reads Internally Primed,"
+          << (nPrimeChecked_ ? (double)nPrimedReads_ / (double)nPrimeChecked_ : 0.0) << "\n";
+        o.unsetf(std::ios::fixed);
+        o << "UMIs Internally Primed," << nPrimedUmis_ << "\n";
+        o.setf(std::ios::fixed); o.precision(6);
+        o << "Fraction of UMIs Internally Primed,"
+          << (nUMIs_ ? (double)nPrimedUmis_ / (double)nUMIs_ : 0.0) << "\n";
+        o.unsetf(std::ios::fixed);
+    }
     // Not "Estimated Number of Cells": no cell calling has happened, this is
     // every barcode with at least one UMI. Naming it otherwise would invite
     // comparison against CellRanger's filtered cell count, which is a

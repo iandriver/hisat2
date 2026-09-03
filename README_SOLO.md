@@ -61,6 +61,7 @@ Order does not otherwise matter: the matrices are identical either way.
 | `--solo-top-cells <n>` | `3000` | How many barcodes `TopCells` keeps |
 | `--solo-multi-mappers <s>` | `Unique` | `Unique`, `Uniform`, `EM` |
 | `--solo-velocyto` | off | Also emit spliced/unspliced/ambiguous matrices |
+| `--solo-internal-priming` | off | Flag molecules primed at A-rich genomic sites (costs ~60% wall time) |
 | `--solo-allelic` | off | Per-cell REF/ALT counts (needs a SNP index) |
 
 ## Output
@@ -69,6 +70,9 @@ Order does not otherwise matter: the matrices are identical either way.
 Solo.out/
   Gene/  and/or  GeneFull/
     Summary.csv
+    UMIcloneSize.tsv
+    UMIcloneSizeByExpr.tsv
+    InternalPriming.tsv                    # with --solo-internal-priming
     raw/       barcodes.tsv  features.tsv  matrix.mtx
                UniqueAndMult-{Uniform,EM}.mtx     # with --solo-multi-mappers
     filtered/  barcodes.tsv  features.tsv  matrix.mtx
@@ -79,6 +83,44 @@ Solo.out/
 Layout matches STARsolo, so `Read10X` and `scanpy.read_10x_mtx` work unchanged.
 Multimapper matrices are MatrixMarket `real`, since distributing a molecule
 across genes gives fractional counts.
+
+### Reads per UMI
+
+`UMIcloneSize.tsv` is the distribution of reads per surviving molecule: one
+row per clone size, counted over every barcode and over called cells alone.
+Reads absorbed by error correction are credited to the molecule that absorbed
+them, so the column totals reconcile exactly with `Total UMIs` and with
+`Sequencing Saturation`.
+
+Saturation is the mean of this distribution and nothing more. The reason to
+keep the shape is the tail. A UMI is supposed to be attached during reverse
+transcription, but residual UMI-bearing oligos can reprime during
+preamplification PCR and put a second, valid UMI on a molecule that already
+carries one. Because that UMI is intact rather than corrupted, no
+deduplication mode here can see it: `1MM_CR` and `1MM_All` correct *errors* in
+a UMI, and one of these is not an error. What it does leave is a heavier tail
+than depth alone produces, which is what the histogram exposes and what
+`UMI Clone Size P99` and `UMI Clone Size Max` in `Summary.csv` summarise.
+
+The two columns are kept apart because ambient barcodes are overwhelmingly
+single-read molecules and would bury the tail if pooled with real cells. Use
+`umis_in_cells` unless you are specifically looking at the background.
+
+`UMIcloneSizeByExpr.tsv` cuts the called-cell distribution ten ways by gene
+expression, where `d1` holds the genes accounting for the first tenth of all
+molecules. The deciles are cut by molecule mass rather than by gene count,
+since a tenth of the genes would hold almost none of the molecules. This
+answers the first objection anyone will raise about a heavy tail: a tail
+confined to `d1` is a handful of very highly expressed genes behaving
+differently, while one present across every decile is a property of the
+chemistry.
+
+This is a diagnostic, not a correction. Sugino & Lee report that model-based
+correction removes the average count inflation but does not recover distorted
+fold-changes, so a heavy tail here is a reason to treat differential
+expression from that library with suspicion, not a thing to subtract off. The
+branching model that turns the shape into a contamination estimate is in
+*The Phantom of the PCR* (bioRxiv 2026, doi:10.64898/2026.08.01.742199).
 
 ## Read this before your first run
 
@@ -121,6 +163,65 @@ paralogues means discarding most of the signal. Measured against STARsolo:
 
 Ribosomal proteins, haemoglobins and other duplicated families are affected.
 EM recovers about 10% more molecules overall (395,354 on a 10M-read run).
+
+### Internal priming
+
+An oligo(dT) primer is meant to find the poly(A) tail. It will also anneal to any
+A-rich stretch inside a transcript, and the molecule that results is
+indistinguishable from a real one downstream: it carries a barcode and a UMI, it
+maps, and it is counted. The only evidence is the genome immediately past where
+the read ends, which is A-rich for a mispriming event and ordinary for a real 3'
+end, whose A's are on the transcript rather than in the reference.
+
+`--solo-internal-priming` reads 20 nt of genome outward from each alignment's 3'
+end -- rightward counting A for a forward alignment, leftward counting T for a
+reverse one -- and calls it primed at 12 or more, or a run of 6. These are the
+thresholds CellRanger, scAPA and Sierra converged on. The flag adds
+`Reads Internally Primed` (over reads that reach a count, not over all reads) and
+molecule-level counts to `Summary.csv`, and writes `InternalPriming.tsv`:
+molecules, primed molecules and the fraction per gene, ordered by molecule count.
+
+Nothing is filtered. The rate is reported so it can be looked at, because a
+threshold that silently removed molecules would be the same mistake as counting
+them without knowing.
+
+The check is deferred until a read is actually counted, since reading the genome
+at an arbitrary position is a random access into three gigabytes and better than
+half of all reads never reach a count.
+
+| library | reads primed | interpretation |
+|---|---|---|
+| human brain snRNA-seq (GSE163577, SRR13278449) | **17.42%** | 4.8x background |
+| human PBMC 5k 3' v3, whole cell | **3.34%** | indistinguishable from background |
+| random genomic windows, same rule, strand-averaged | 3.64% | the floor |
+
+The background row is what the rule scores on 236,153 random 20 nt windows drawn
+from the same `genome.fa` the index was built on. A whole-cell 3' library sits on
+that floor; the single-nucleus library sits at nearly five times it. The rule is
+finding structure, not firing on ordinary sequence -- and mispriming here is a
+property of nuclear RNA, which is mostly intronic and where A-rich stretches
+live.
+
+Within the snRNA-seq sample the same split shows up between features:
+
+| | molecules | primed |
+|---|---|---|
+| `Gene` (exonic) | 405,782 | 13.51% |
+| `GeneFull` (gene body) | 1,870,831 | **17.90%** |
+
+Roughly 19% of the 1.47 M molecules `GeneFull` adds over `Gene` are primed,
+against 13.5% of the exonic ones. If you count gene bodies for nuclei, part of
+what you gain is mispriming, and this says how much. Per gene, `MALAT1` sits at
+22.2% and `NEAT1` at 18.2% -- both nuclear, both heavily counted in snRNA-seq.
+
+**Cost.** On the PBMC library the flag is free: 116.9 s with it against 123.9 s
+without, on 10 M reads at `-p 10`, with system time unchanged. An earlier
+measurement on the snRNA-seq library, before the check was deferred and on a run
+holding 10.4 GB resident, cost 64% more wall time with system time rising from
+116 s to 688 s -- the signature of page faults rather than computation. Those two
+numbers differ in both the code and the library, and the snRNA-seq FASTQs are no
+longer on disk to separate them, so the flag stays off by default until the cost
+can be re-measured on a memory-pressured run.
 
 ## Concordance with STARsolo (mouse)
 

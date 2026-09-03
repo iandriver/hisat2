@@ -297,8 +297,88 @@ PYEOF
     else
         bad "Gene and GeneFull agree ($g vs $gf) -- the identity checks above prove nothing"
     fi
+
+    # The reads-per-UMI histogram must reconcile with the matrix it came from:
+    # one entry per counted molecule, and the reads behind them are exactly the
+    # ones Sequencing Saturation is computed from. A histogram that disagreed
+    # with the summary would be worse than none, since its whole use is as
+    # evidence about counts nothing else can see.
+    if python3 - "$SC" <<'PYEOF'
+import sys, os
+d = os.path.join(sys.argv[1], "Solo.out", "Gene")
+umis = reads = 0
+for l in open(os.path.join(d, "UMIcloneSize.tsv")):
+    if l.startswith("#") or l.startswith("reads_per_umi"): continue
+    k, a, _c = l.split()
+    if k.startswith(">"): sys.exit(5)   # not expected at this scale
+    umis += int(a); reads += int(k) * int(a)
+summ = {}
+for l in open(os.path.join(d, "Summary.csv")):
+    key, _, v = l.rstrip().partition(',')
+    summ[key] = v
+if umis != int(summ["Total UMIs"]): sys.exit(1)
+if reads == 0: sys.exit(2)
+# Mean clone size must agree with the saturation the summary reports
+# independently. Comparing it against a saturation recomputed from the
+# histogram's own totals would be self-consistent and prove nothing -- that is
+# how a histogram counting merged UMIs rather than reads once passed here.
+# The two differ only by reads on multi-gene ties, so the tolerance is loose.
+sat = float(summ["Sequencing Saturation"])
+if sat >= 1.0: sys.exit(6)
+want_mean, got_mean = 1.0 / (1.0 - sat), float(reads) / float(umis)
+if abs(want_mean - got_mean) > 0.05 * want_mean: sys.exit(3)
+if int(summ["UMI Clone Size Max"]) <= 0: sys.exit(4)
+PYEOF
+    then
+        ok "UMI clone-size histogram reconciles with Total UMIs and saturation"
+    else
+        bad "UMIcloneSize.tsv disagrees with Summary.csv (exit $?)"
+    fi
+
+    # The decile split must partition the same molecules, not a different set:
+    # every row of the by-expression file has to sum to the in-cells column it
+    # was cut from.
+    if python3 - "$SC" <<'PYEOF'
+import sys, os
+d = os.path.join(sys.argv[1], "Solo.out", "Gene")
+cells = {}
+for l in open(os.path.join(d, "UMIcloneSize.tsv")):
+    if l.startswith("#") or l.startswith("reads_per_umi"): continue
+    f = l.split()
+    if f[0].startswith(">"): continue
+    if int(f[2]): cells[int(f[0])] = int(f[2])
+byd = {}
+for l in open(os.path.join(d, "UMIcloneSizeByExpr.tsv")):
+    if l.startswith("#") or l.startswith("reads_per_umi"): continue
+    f = l.split()
+    byd[int(f[0])] = sum(int(x) for x in f[1:])
+if {k: v for k, v in byd.items() if v} != cells: sys.exit(1)
+PYEOF
+    then
+        ok "expression-decile split partitions the in-cells molecules exactly"
+    else
+        bad "UMIcloneSize.tsv disagrees with Summary.csv (exit $?)"
+    fi
 else
     bad "could not generate single-cell test data"
+fi
+
+# The internal-priming rule decides whether a molecule is called an artifact,
+# so both directions matter: real 3' ends must not trip it.
+if $CXX -std=c++11 -O2 -iquote . -o "$TMP/unit_solo_priming" tests/unit_solo_priming.cpp > /dev/null 2>&1 \
+   && "$TMP/unit_solo_priming" > /dev/null 2>&1; then
+    ok "internal-priming window rule unit test"
+else
+    bad "internal-priming window rule unit test failed"
+fi
+
+# Clone sizes are bookkeeping over deduplication and must change none of its
+# decisions; the unit test checks that against the pre-histogram rule.
+if $CXX -std=c++11 -O2 -iquote . -o "$TMP/unit_solo_umi" tests/unit_solo_umi.cpp > /dev/null 2>&1 \
+   && "$TMP/unit_solo_umi" > /dev/null 2>&1; then
+    ok "UMI collapsing unit test: clone sizes, read conservation, no drift"
+else
+    bad "UMI collapsing unit test failed"
 fi
 
 echo "== 9. hisat2_filter_snps.py masks pseudogenes but spares real exons =="

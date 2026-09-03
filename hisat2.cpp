@@ -266,6 +266,7 @@ static string soloUmiDedupStr;        // Exact / 1MM_CR / 1MM_All / NoDedup
 static bool   soloAllelic;            // emit per-cell REF/ALT variant matrices
 static string soloCellFilterStr;      // CellRanger2.2 / TopCells / EmptyDrops_CR / None
 static bool   soloVelocyto;           // emit spliced/unspliced/ambiguous matrices
+static bool   soloInternalPriming;    // flag molecules primed at A-rich genomic sites
 static string soloMultiStr;           // Unique / Uniform / EM
 static int    soloExpectedCells;      // knee filter: expected cell count
 static int    soloTopCells;           // TopCells: how many to keep
@@ -526,6 +527,7 @@ static void resetOptions() {
     soloAllelic = false;
     soloCellFilterStr = "CellRanger2.2";
     soloVelocyto = false;
+    soloInternalPriming = false;
     soloMultiStr = "Unique";
     soloExpectedCells = 3000;
     soloTopCells = 3000;
@@ -783,6 +785,7 @@ static struct option long_options[] = {
     {(char*)"solo-allelic",                 no_argument,       0,        ARG_SOLO_ALLELIC},
     {(char*)"solo-cell-filter",             required_argument, 0,        ARG_SOLO_CELL_FILTER},
     {(char*)"solo-velocyto",                no_argument,       0,        ARG_SOLO_VELOCYTO},
+    {(char*)"solo-internal-priming",        no_argument,       0,        ARG_SOLO_INTERNAL_PRIMING},
     {(char*)"solo-multi-mappers",           required_argument, 0,        ARG_SOLO_MULTI},
     {(char*)"solo-expected-cells",          required_argument, 0,        ARG_SOLO_EXPECTED_CELLS},
     {(char*)"solo-top-cells",               required_argument, 0,        ARG_SOLO_TOP_CELLS},
@@ -1801,6 +1804,7 @@ static void parseOption(int next_option, const char *arg) {
         case ARG_SOLO_ALLELIC: soloAllelic = true; break;
         case ARG_SOLO_CELL_FILTER: soloCellFilterStr = arg; break;
         case ARG_SOLO_VELOCYTO: soloVelocyto = true; break;
+        case ARG_SOLO_INTERNAL_PRIMING: soloInternalPriming = true; break;
         case ARG_SOLO_MULTI: soloMultiStr = arg; break;
         case ARG_SOLO_EXPECTED_CELLS: soloExpectedCells = parseInt(1, "--solo-expected-cells must be >= 1", arg); break;
         case ARG_SOLO_TOP_CELLS: soloTopCells = parseInt(1, "--solo-top-cells must be >= 1", arg); break;
@@ -4372,6 +4376,13 @@ static void driver(
                                         );
         delete _tRef;
         if(!refs->loaded()) throw 1;
+
+        // Internal-priming detection reads the genome just past each alignment,
+        // so it can only be wired up once the reference is loaded -- after the
+        // counter itself was configured further up.
+        if(soloCounter.enabled() && soloInternalPriming) {
+            soloCounter.setInternalPriming(true, refs.get());
+        }
         
         BitPairReference* rrefs = NULL;
         if(rep_index_exists && use_repeat_index) {
