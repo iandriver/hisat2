@@ -279,10 +279,12 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         if(haveBlock) blocks.push_back(std::make_pair(blockStart, pos));
         if(blocks.empty()) continue;
 
-        // Remember where the first (best) alignment ends. The check itself is
-        // deferred: reading the genome there costs a random access into three
-        // gigabytes, and better than half of all reads never reach a count.
-        if(i == 0 && p->internalPriming()) {
+        // Remember where the first alignment the aligner would report ends --
+        // the first to survive the top-score filter above, which is not
+        // necessarily candidate 0. The check itself is deferred: reading the
+        // genome there costs a random access into three gigabytes, and better
+        // than half of all reads never reach a count.
+        if(primeRef < 0 && p->internalPriming()) {
             primeRef = (int32_t)rs.refid();
             primeFw  = rs.fw();
             primeL   = blocks.front().first;
