@@ -295,6 +295,8 @@ private:
     bool writeCloneHistByExpr(std::string& err) const;
     /** Writes the per-gene internal-priming table. */
     bool writePriming(std::string& err) const;
+    /** Writes each called cell's clone-size histogram in the detector's bins. */
+    bool writeCloneHistByCell(std::string& err) const;
     bool writeVelocyto(std::vector<SoloRec>& velo, std::string& err);
     bool writeMultiMatrix(const std::vector<SoloRec>& counts,
                           const std::vector<uint32_t>& tally,
@@ -360,6 +362,12 @@ private:
     uint64_t nPrimedReads_ = 0, nPrimeChecked_ = 0;
     uint64_t nPrimedUmis_ = 0;
     std::vector<uint64_t> genePrimedUmis_, geneUmis_;
+
+    // One clone-size histogram per called cell, in the detector's bins. The
+    // phantom detector is a per-cell method, so a pooled histogram -- which
+    // averages over cells of very different depth -- is the wrong input.
+    std::vector<uint32_t> cellIdx_;
+    std::vector<SoloCloneHist> cellHist_;
 };
 
 #endif /* SOLO_COUNTER_H_ */

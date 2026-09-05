@@ -357,6 +357,40 @@ PYEOF
     then
         ok "expression-decile split partitions the in-cells molecules exactly"
     else
+        bad "UMIcloneSizeByExpr.tsv does not partition the in-cells molecules (exit $?)"
+    fi
+
+    # The per-cell file is what the phantom detector consumes, so its rows must
+    # sum to the same molecules and reads as the pooled in-cells column.
+    if python3 - "$SC" <<'PYEOF'
+import sys, os
+d = os.path.join(sys.argv[1], "Solo.out", "Gene")
+cells = {}
+for l in open(os.path.join(d, "UMIcloneSize.tsv")):
+    if l.startswith("#") or l.startswith("reads_per_umi"): continue
+    f = l.split()
+    if f[0].startswith(">"): continue
+    if int(f[2]): cells[int(f[0])] = int(f[2])
+pooled_umis = sum(cells.values())
+pooled_reads = sum(k * v for k, v in cells.items())
+umis = reads = 0
+binned = [0] * 20
+for l in open(os.path.join(d, "UMIcloneSizeByCell.tsv")):
+    if l.startswith("#") or l.startswith("barcode"): continue
+    f = l.split()
+    umis += int(f[1]); reads += int(f[2])
+    for i, v in enumerate(f[3:23]): binned[i] += int(v)
+if umis != pooled_umis: sys.exit(1)
+if reads != pooled_reads: sys.exit(2)
+if sum(binned) != pooled_umis: sys.exit(3)
+# and the bins must agree with the pooled histogram bin for bin
+want = [0] * 20
+for k, v in cells.items(): want[min(k, 20) - 1] += v
+if binned != want: sys.exit(4)
+PYEOF
+    then
+        ok "per-cell clone-size bins reconcile with the pooled histogram"
+    else
         bad "UMIcloneSize.tsv disagrees with Summary.csv (exit $?)"
     fi
 else

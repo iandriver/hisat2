@@ -189,4 +189,21 @@ struct SoloCloneHist {
     }
 };
 
+/**
+ * The binning the PhantomUMI detector consumes: k = 1..19 with a k >= 20
+ * catch-all (Sugino & Lee 2026, doi:10.64898/2026.08.01.742199, B.2/B.3).
+ * Extending the catch-all buys almost nothing and raises the clean-versus-
+ * clean noise floor, which is why they stop at 20.
+ */
+const int kCloneBins = 20;
+
+inline void soloCloneBins(const SoloCloneHist& h, uint64_t* out) {
+    for(int b = 0; b < kCloneBins; b++) out[b] = 0;
+    for(size_t k = 1; k < h.bins.size(); k++) {
+        if(h.bins[k] == 0) continue;
+        out[k < (size_t)kCloneBins ? k - 1 : kCloneBins - 1] += h.bins[k];
+    }
+    out[kCloneBins - 1] += h.nOver;
+}
+
 #endif /* SOLO_UMI_H_ */

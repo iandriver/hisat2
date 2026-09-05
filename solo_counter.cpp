@@ -478,6 +478,7 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
     nCalledCells_ = nUMIsInCells_ = nMultiUMIs_ = nAmbigResolved_ = 0;
     cloneAll_.clear(); cloneCell_.clear();
     cloneByDecile_.assign(kDeciles, SoloCloneHist());
+    cellIdx_.clear(); cellHist_.clear();
     nPrimedUmis_ = 0;
     genePrimedUmis_.assign(gm_ != NULL ? gm_->numGenes() : 0, 0);
     geneUmis_.assign(gm_ != NULL ? gm_->numGenes() : 0, 0);
@@ -750,14 +751,28 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
 
     // Bin the parked clone sizes now that cells are known, then release the
     // arena before the multimapper pass allocates.
+    // Per-cell histograms are indexed through a sparse map so only called
+    // cells occupy anything; a whitelist-sized vector of histograms would be
+    // millions of empty objects.
+    std::map<uint32_t, size_t> cellSlot;
     for(size_t k = 0; k < cloneOff.size(); k++) {
         const bool cell = isCell[counts[k].cb] != 0;
         const uint32_t g = counts[k].gene();
         const uint8_t d = g < geneDecile.size() ? geneDecile[g] : (uint8_t)(kDeciles - 1);
+        SoloCloneHist* ch = NULL;
+        if(cell) {
+            std::map<uint32_t, size_t>::iterator it = cellSlot.find(counts[k].cb);
+            if(it == cellSlot.end()) {
+                it = cellSlot.insert(std::make_pair(counts[k].cb, cellHist_.size())).first;
+                cellHist_.push_back(SoloCloneHist());
+                cellIdx_.push_back(counts[k].cb);
+            }
+            ch = &cellHist_[it->second];
+        }
         for(uint32_t x = 0; x < cloneN[k]; x++) {
             const uint32_t c = cloneArena[cloneOff[k] + x];
             cloneAll_.add(c);
-            if(cell) { cloneCell_.add(c); cloneByDecile_[d].add(c); }
+            if(cell) { cloneCell_.add(c); cloneByDecile_[d].add(c); ch->add(c); }
         }
     }
     std::vector<uint32_t>().swap(cloneArena);
@@ -766,6 +781,7 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
     if(!writeCloneHist(err)) return false;
     if(!writeCloneHistByExpr(err)) return false;
     if(!writePriming(err)) return false;
+    if(!writeCloneHistByCell(err)) return false;
 
     if(!multi.empty() && !writeMultiMatrix(counts, tally, multi, multiGenes, err)) return false;
     if(!writeSummary(err)) return false;
@@ -1264,6 +1280,33 @@ bool SoloCounter::writePriming(std::string& err) const {
         o << gm_->geneId(g) << "\t" << gm_->geneName(g) << "\t"
           << geneUmis_[g] << "\t" << genePrimedUmis_[g] << "\t"
           << (double)genePrimedUmis_[g] / (double)geneUmis_[g] << "\n";
+    }
+    return true;
+}
+
+bool SoloCounter::writeCloneHistByCell(std::string& err) const {
+    const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
+    std::string path = outDir_ + "/" + featName + "/UMIcloneSizeByCell.tsv";
+    std::ofstream o(path.c_str());
+    if(!o.good()) { err = "could not write " + path; return false; }
+
+    o << "# per-cell clone-size histogram, called cells, in the bins the\n"
+         "# PhantomUMI detector consumes: k=1..19 with a k>=20 catch-all.\n"
+         "# umi_reads is the cell's total reads over surviving molecules; the\n"
+         "# detector's own threshold is >= 10000.\n";
+    o << "barcode\tumis\tumi_reads";
+    for(int b = 1; b < kCloneBins; b++) o << "\tk" << b;
+    o << "\tk" << kCloneBins << "plus\n";
+
+    std::vector<uint64_t> bins(kCloneBins, 0);
+    char buf[64];
+    for(size_t i = 0; i < cellHist_.size(); i++) {
+        const SoloCloneHist& h = cellHist_[i];
+        soloCloneBins(h, &bins[0]);
+        soloUnpack(wl_->codeAt(cellIdx_[i]), wl_->cbLen(), buf);
+        o << buf << "\t" << h.umis() << "\t" << h.reads();
+        for(int b = 0; b < kCloneBins; b++) o << "\t" << bins[b];
+        o << "\n";
     }
     return true;
 }
