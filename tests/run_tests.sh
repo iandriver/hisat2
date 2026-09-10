@@ -456,6 +456,55 @@ else
     bad "could not build the retrogene fixture"
 fi
 
+# The allelic path had the same flaw one level down: it demanded exactly one
+# raw candidate rather than one top-scoring one. A paralog copy carrying the
+# reference base gives every REF read a second, lower-ranked candidate, while
+# ALT reads mismatch the copy and get none -- so the old gate dropped REF reads
+# and kept ALT ones, skewing allele ratios toward ALT at any locus with such a
+# copy. On this fixture it counted 0 REF and 30 ALT molecules against 30 of
+# each. (Genome-wide on human PBMC the loss was not skewed: the 305,088
+# observations the fix recovered were 84.1% REF, like the rest.) The index needs --ss/--exon: without the
+# junction built in, the aligner seeds on the retrogene and no read covers the
+# SNP, which would make this test pass for the wrong reason.
+RGS="$TMP/retro_snp"
+if python3 tests/make_retrogene_reads.py --fasta example/reference/22_20-21M.fa \
+        --outdir "$RGS" --with-snp > /dev/null 2>&1 && \
+   ./hisat2-build -q --snp "$RGS/ref.snp" --ss "$RGS/splicesites.txt" \
+        --exon "$RGS/exons.txt" "$RGS/ref.fa" "$RGS/idx" > /dev/null 2>&1; then
+    ./hisat2 -x "$RGS/idx" -U "$RGS/reads.fq" --solo-cb-in-readname \
+        --solo-cb-whitelist "$RGS/whitelist.txt" --gene-annotation "$RGS/model.ht2gm" \
+        --solo-cell-filter None --solo-allelic --solo-out-dir "$RGS/Solo.out" \
+        -p 4 -S /dev/null > /dev/null 2>&1
+    if python3 - "$RGS" <<'PYEOF'
+import sys, os
+d = sys.argv[1]; D = os.path.join(d, "Solo.out", "Allelic", "raw")
+if not os.path.isfile(D + "/ref.mtx"): sys.exit(1)
+feats = [l.split('\t')[0] for l in open(D + "/features.tsv")]
+bcs = [l.strip() for l in open(D + "/barcodes.tsv")]
+def load(p):
+    m = {}
+    for i, l in enumerate(open(p)):
+        if i < 3: continue
+        r, c, v = l.split(); m[(feats[int(r)-1], bcs[int(c)-1])] = int(v)
+    return m
+got = {'ref': load(D + "/ref.mtx"), 'alt': load(D + "/alt.mtx")}
+n = 0
+for i, l in enumerate(open(os.path.join(d, "expected_allelic.tsv"))):
+    if i == 0: continue
+    bc, rs, allele, cnt = l.rstrip().split('\t')
+    if got[allele].get((rs, bc), 0) != int(cnt): sys.exit(2)
+    n += 1
+if n == 0: sys.exit(3)
+PYEOF
+    then
+        ok "allelic path keeps REF reads that have a paralog candidate (REF and ALT exact)"
+    else
+        bad "allelic counts on the paralog SNP fixture disagree with expectation (exit $?)"
+    fi
+else
+    bad "could not build the retrogene SNP fixture"
+fi
+
 echo "== 9. hisat2_filter_snps.py masks pseudogenes but spares real exons =="
 # A processed pseudogene lying across a real gene's exon (the DHFRP2/HLA-B case)
 # must not cost that exon its variants.

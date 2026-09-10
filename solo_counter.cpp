@@ -242,10 +242,14 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
 
     // Rank exactly as selectByScore does, then keep only the top group.
     TAlScore bestScore = std::numeric_limits<TAlScore>::min();
+    size_t nTop = 0;
     for(size_t i = 0; i < nresults; i++) {
         TAlScore h = (*results)[i].score().hisat2_score();
-        if(h > bestScore) bestScore = h;
+        if(h > bestScore)       { bestScore = h; nTop = 1; }
+        else if(h == bestScore) { nTop++; }
     }
+    // The candidate the allele pass reads, set only once its blocks are built.
+    size_t allelicIdx = nresults;
 
     for(size_t i = 0; i < nresults; i++) {
         const AlnRes& rs = (*results)[i];
@@ -278,6 +282,7 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
         }
         if(haveBlock) blocks.push_back(std::make_pair(blockStart, pos));
         if(blocks.empty()) continue;
+        if(nTop == 1) allelicIdx = i;
 
         // Remember where the first alignment the aligner would report ends --
         // the first to survive the top-score filter above, which is not
@@ -331,12 +336,23 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     // Allele observations.  A read that took an alternate path through the
     // graph carries an edit tagged with that variant's ALTDB index; any tracked
     // variant inside the alignment without such an edit was seen as reference.
-    // Restricted to uniquely-aligned reads: for a multi-locus read the alleles
-    // it supports are ambiguous.
+    // Restricted to reads with a single top-scoring alignment, the ones the
+    // aligner itself calls unique: for a multi-locus read the alleles it
+    // supports are ambiguous.
+    //
+    // This used to demand nresults == 1, which dropped a read whenever
+    // selectByScore had any lower-ranked candidate to discard: 305,088 allele
+    // observations (9.7%) on human PBMC against a 15.5M-SNP graph index. Where
+    // a paralog copy carries the reference base the loss is allele-specific --
+    // REF reads gain a second candidate there and ALT reads do not -- though
+    // genome-wide the recovered molecules matched the rest (84.1% REF against
+    // 84.2%). It also read candidate 0, which is not ordered by score, and
+    // trusted `blocks` even when that candidate's CIGAR failed to build and the
+    // thread-local vector still held the previous read's.
     const SoloVariantIndex* vi = p->variantIndex();
-    if(vi != NULL && !vi->empty() && nresults == 1 && sr.corrected()) {
+    if(vi != NULL && !vi->empty() && allelicIdx < nresults && sr.corrected()) {
         static thread_local std::vector<uint32_t> altSeen, spanned;
-        const AlnRes& rs = (*results)[0];
+        const AlnRes& rs = (*results)[allelicIdx];
         altSeen.clear(); spanned.clear();
         const EList<Edit>& eds = rs.ned();
         for(size_t k = 0; k < eds.size(); k++) {

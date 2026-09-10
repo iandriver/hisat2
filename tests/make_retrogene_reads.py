@@ -42,6 +42,8 @@ def main():
     ap.add_argument('--outdir', required=True)
     ap.add_argument('--nreads', type=int, default=60)
     ap.add_argument('--readlen', type=int, default=90)
+    ap.add_argument('--with-snp', action='store_true',
+                    help='add one SNP in parent exon 1 and emit REF and ALT reads')
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
 
@@ -93,14 +95,37 @@ def main():
         o.write("G\t1\tGENE_RETRO\tRetro\t%s\t+\t%d\t%d\n" % (chrom, retro_s, retro_e))
         o.write("E\t1\t%s\t%d\t%d\n" % (chrom, retro_s, retro_e))
 
-    # Splice sites for --known-splicesite-infile: 0-based donor/acceptor.
+    # Splice sites and exons in hisat2_extract_splice_sites.py /
+    # hisat2_extract_exons.py format (0-based, inclusive), usable both as
+    # --known-splicesite-infile and as hisat2-build --ss/--exon. A graph (--snp)
+    # index needs the junction built in: without it the aligner seeds on the
+    # retrogene's ungapped copy and never explores the spliced parent, so no
+    # read would cover the SNP at all.
     with open(os.path.join(a.outdir, 'splicesites.txt'), 'w') as o:
         o.write("%s\t%d\t%d\t+\n" % (chrom, p_e1_e - 1, p_e2_s))
+    with open(os.path.join(a.outdir, 'exons.txt'), 'w') as o:
+        o.write("%s\t%d\t%d\t+\n" % (chrom, p_e1_s, p_e1_e - 1))
+        o.write("%s\t%d\t%d\t+\n" % (chrom, p_e2_s, p_e2_e - 1))
+        o.write("%s\t%d\t%d\t+\n" % (chrom, retro_s, retro_e - 1))
+
+    # One SNP in parent exon 1, placed so every read covers it: reads take
+    # 20..69 bases from the end of exon 1, so offset EX1-10 is always inside.
+    # The retrogene keeps the reference base, so a REF read still aligns
+    # perfectly to both loci -- exactly the case the allelic path used to drop,
+    # because it demanded a single raw candidate rather than a single
+    # top-scoring one.
+    SNP_OFF = EX1 - 10
+    snp_pos = p_e1_s + SNP_OFF
+    ref_base = seq[snp_pos]
+    alt_base = {'A': 'C', 'C': 'G', 'G': 'T', 'T': 'A'}[ref_base]
+    if a.with_snp:
+        with open(os.path.join(a.outdir, 'ref.snp'), 'w') as o:
+            o.write("rsRETRO\tsingle\t%s\t%d\t%s\n" % (chrom, snp_pos, alt_base))
 
     # Every read straddles the junction, so each one aligns spliced to the
     # parent and contiguously to the retrogene.
-    bcs = ['%s' % ('ACGT' * 4)[:16]]
     bcs = ['AAACCCAAGAAACACT', 'AAACCCAAGAAACCAT', 'AAACCCAAGAAACCCA']
+    expect = {}
     fq = open(os.path.join(a.outdir, 'reads.fq'), 'w')
     n = 0
     for k in range(a.nreads):
@@ -111,7 +136,16 @@ def main():
         if len(r) < a.readlen:
             continue
         bc = bcs[k % len(bcs)]
-        umi = ''.join('ACGT'[(k >> (2 * j)) & 3] for j in range(6)) + 'ACGTAC'
+        # The 6-base code is written twice, so any two UMIs differ in at least
+        # two positions and 1MM collapsing cannot merge distinct molecules.
+        code = ''.join('ACGT'[(k >> (2 * j)) & 3] for j in range(6))
+        umi = code + code
+        allele = 'ref'
+        if a.with_snp and k % 2 == 1:
+            i = SNP_OFF - start          # SNP position within the read
+            r = r[:i] + alt_base + r[i + 1:]
+            allele = 'alt'
+        expect[(bc, allele)] = expect.get((bc, allele), 0) + 1
         fq.write('@r%d_%s_%s\n%s\n+\n%s\n' % (k, bc, umi, r, 'I' * len(r)))
         n += 1
     fq.close()
@@ -119,6 +153,12 @@ def main():
     with open(os.path.join(a.outdir, 'whitelist.txt'), 'w') as o:
         for b in bcs:
             o.write(b + '\n')
+
+    if a.with_snp:
+        with open(os.path.join(a.outdir, 'expected_allelic.tsv'), 'w') as o:
+            o.write("barcode\trsid\tallele\tumi_count\n")
+            for (bc, allele), c in sorted(expect.items()):
+                o.write("%s\trsRETRO\t%s\t%d\n" % (bc, allele, c))
 
     print("len=%d parent=%d-%d/%d-%d retro=%d-%d reads=%d"
           % (len(seq), p_e1_s, p_e1_e, p_e2_s, p_e2_e, retro_s, retro_e, n))
