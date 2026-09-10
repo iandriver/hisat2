@@ -132,11 +132,22 @@ struct SoloAmbigRec {
  * rsIDs (unlike genes, whose identity the index discards), so this converts
  * them once to per-chromosome coordinates and sorts them for range queries.
  * Immutable after build(), so lookups need no locking.
+ *
+ * One site and allele can have several ALTDB records -- the loader lists every
+ * deletion twice, and hisat2-build keeps a .snp line written twice -- and a
+ * read's edit names only one of them. build() therefore merges records with
+ * the same refid, pos, type, len and seq into one variant, so the read is ALT
+ * at that variant rather than ALT at one record and REF at its twin.
  */
 class SoloVariantIndex {
 public:
-    /** pos is 0-based, per-chromosome. altIdx indexes ALTDB::alts(). */
-    void add(int32_t refid, int64_t pos, uint32_t altIdx, const std::string& name);
+    /**
+     * pos is 0-based, per-chromosome, and for a deletion its first deleted
+     * base. type, len and seq are the ALT's, with seq 0 for a deletion.
+     * altIdx indexes ALTDB::alts().
+     */
+    void add(int32_t refid, int64_t pos, uint32_t type, uint32_t len, uint64_t seq,
+             uint32_t altIdx, const std::string& name);
     void build();
     size_t size() const { return nameOff_.size(); }
     bool empty() const { return nameOff_.empty(); }
@@ -153,6 +164,7 @@ private:
     std::vector<uint32_t> nameOff_;
     std::vector<char>     nameBlob_;
     std::vector<uint32_t> altToSlot_;          // ALTDB index -> slot
+    std::vector<uint64_t> kind_, seq_;         // allele per added record; freed by build()
 };
 
 class SoloCounter;

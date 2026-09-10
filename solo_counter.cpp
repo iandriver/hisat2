@@ -87,13 +87,15 @@ bool makeDirs(const std::string& path) {
 
 } // namespace
 
-void SoloVariantIndex::add(int32_t refid, int64_t pos, uint32_t altIdx,
-                           const std::string& name) {
+void SoloVariantIndex::add(int32_t refid, int64_t pos, uint32_t type, uint32_t len,
+                           uint64_t seq, uint32_t altIdx, const std::string& name) {
     if(refid < 0) return;
     uint32_t slot = (uint32_t)nameOff_.size();
     nameOff_.push_back((uint32_t)nameBlob_.size());
     nameBlob_.insert(nameBlob_.end(), name.begin(), name.end());
     nameBlob_.push_back('\0');
+    kind_.push_back(((uint64_t)type << 32) | len);
+    seq_.push_back(seq);
     if((size_t)refid >= byRef_.size()) byRef_.resize(refid + 1);
     Entry e; e.pos = pos; e.slot = slot;
     byRef_[refid].push_back(e);
@@ -101,17 +103,55 @@ void SoloVariantIndex::add(int32_t refid, int64_t pos, uint32_t altIdx,
     altToSlot_[altIdx] = slot;
 }
 
-namespace {
-bool entryLess(const std::pair<int64_t, uint32_t>& a, const std::pair<int64_t, uint32_t>& b) {
-    return a.first < b.first;
-}
-}
-
 void SoloVariantIndex::build() {
+    const size_t n = nameOff_.size();
+    // The slot each added record merges into. Sorting ties by slot puts the
+    // first-added record of a site and allele first, so survivor[s] <= s.
+    std::vector<uint32_t> survivor(n);
+    for(size_t s = 0; s < n; s++) survivor[s] = (uint32_t)s;
     for(size_t r = 0; r < byRef_.size(); r++) {
-        std::sort(byRef_[r].begin(), byRef_[r].end(),
-                  [](const Entry& a, const Entry& b) { return a.pos < b.pos; });
+        std::vector<Entry>& v = byRef_[r];
+        std::sort(v.begin(), v.end(), [this](const Entry& a, const Entry& b) {
+            if(a.pos != b.pos) return a.pos < b.pos;
+            if(kind_[a.slot] != kind_[b.slot]) return kind_[a.slot] < kind_[b.slot];
+            if(seq_[a.slot] != seq_[b.slot]) return seq_[a.slot] < seq_[b.slot];
+            return a.slot < b.slot;
+        });
+        size_t w = 0;
+        for(size_t i = 0; i < v.size(); i++) {
+            if(w > 0 && v[w - 1].pos == v[i].pos &&
+               kind_[v[w - 1].slot] == kind_[v[i].slot] && seq_[v[w - 1].slot] == seq_[v[i].slot]) {
+                survivor[v[i].slot] = v[w - 1].slot;
+                continue;
+            }
+            v[w++] = v[i];
+        }
+        v.resize(w);
     }
+
+    // Renumber the survivors densely in the order they were added, so an index
+    // with no duplicates keeps exactly the slots, and features.tsv rows, it had.
+    std::vector<uint32_t> renum(n);
+    std::vector<uint32_t> off;
+    std::vector<char> blob;
+    uint32_t next = 0;
+    for(size_t s = 0; s < n; s++) {
+        if(survivor[s] != s) { renum[s] = renum[survivor[s]]; continue; }
+        renum[s] = next++;
+        size_t b = nameOff_[s], e = s + 1 < n ? nameOff_[s + 1] : nameBlob_.size();
+        off.push_back((uint32_t)blob.size());
+        blob.insert(blob.end(), nameBlob_.begin() + b, nameBlob_.begin() + e);
+    }
+    for(size_t r = 0; r < byRef_.size(); r++) {
+        for(size_t i = 0; i < byRef_[r].size(); i++) byRef_[r][i].slot = renum[byRef_[r][i].slot];
+    }
+    for(size_t a = 0; a < altToSlot_.size(); a++) {
+        if(altToSlot_[a] != 0xffffffffu) altToSlot_[a] = renum[altToSlot_[a]];
+    }
+    nameOff_.swap(off);
+    nameBlob_.swap(blob);
+    std::vector<uint64_t>().swap(kind_);
+    std::vector<uint64_t>().swap(seq_);
 }
 
 uint32_t SoloVariantIndex::slotForAlt(uint32_t altIdx) const {
@@ -336,6 +376,9 @@ void SoloCounterThread::addRead(const Read& rd, const EList<AlnRes>* results,
     // Allele observations.  A read that took an alternate path through the
     // graph carries an edit tagged with that variant's ALTDB index; any tracked
     // variant inside the alignment without such an edit was seen as reference.
+    // That holds only because every ALTDB record of a site maps to one slot
+    // (SoloVariantIndex::build): an edit names one record, and a twin with its
+    // own slot would read as a false REF call for every ALT molecule.
     // Restricted to reads with a single top-scoring alignment, the ones the
     // aligner itself calls unique: for a multi-locus read the alleles it
     // supports are ambiguous.

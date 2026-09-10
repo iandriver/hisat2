@@ -4312,12 +4312,22 @@ static void driver(
                     const EList<string>& anames = altdb->altnames();
                     size_t nsnp = 0;
                     for(size_t ai = 0; ai < alts.size(); ai++) {
-                        if(!alts[ai].snp()) continue;
+                        const ALT<index_t>& alt = alts[ai];
+                        if(!alt.snp()) continue;
+                        // The loader lists every deletion a second time, anchored
+                        // at its last base with `reversed` set, and a read's edit
+                        // may name either copy. Key both at the first deleted base
+                        // so build() makes them one variant.
+                        index_t apos = alt.pos;
+                        if(alt.deletion() && alt.reversed) apos = alt.pos - alt.len + 1;
                         index_t tidx = 0, toff = 0, tlen = 0;
                         bool straddled = false;
-                        if(!gfm.joinedToTextOff(1, alts[ai].pos, tidx, toff, tlen,
+                        if(!gfm.joinedToTextOff(1, apos, tidx, toff, tlen,
                                                 true, straddled)) continue;
-                        soloVariants.add((int32_t)tidx, (int64_t)toff, (uint32_t)ai,
+                        // A deletion's seq holds the `reversed` flag, not an allele.
+                        soloVariants.add((int32_t)tidx, (int64_t)toff, (uint32_t)alt.type,
+                                         (uint32_t)alt.len, alt.deletion() ? 0 : alt.seq,
+                                         (uint32_t)ai,
                                          ai < anames.size() ? anames[ai] : string("."));
                         nsnp++;
                     }
@@ -4329,7 +4339,10 @@ static void driver(
                         throw 1;
                     }
                     soloCounter.setVariantIndex(&soloVariants);
-                    if(gVerbose) cerr << "Tracking " << nsnp << " variants for allelic output" << endl;
+                    if(gVerbose) {
+                        cerr << "Tracking " << soloVariants.size() << " variants for allelic output ("
+                             << nsnp - soloVariants.size() << " duplicate ALTDB records merged)" << endl;
+                    }
                 }
                 SoloCellFilter cf = SOLO_FILTER_CELLRANGER22;
                 if(soloCellFilterStr == "None")              cf = SOLO_FILTER_NONE;

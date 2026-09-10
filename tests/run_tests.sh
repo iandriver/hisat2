@@ -505,6 +505,59 @@ else
     bad "could not build the retrogene SNP fixture"
 fi
 
+# Two ALTDB records for one site must be one variant, observed once per read.
+# The index loader adds a second copy of every deletion, anchored at its last
+# base, and hisat2-build keeps a .snp line written twice. Each record used to
+# get its own feature, so a read whose edit named one record was ALT there and
+# REF at its twin: every ALT molecule was also a false REF call, and every REF
+# molecule counted twice. On human PBMC that was 1.1M deletions listed twice,
+# 10.8% of all allele observations on the duplicated rows, and 28,138 false
+# REF calls. The deletion is 3 bases so its copy sits at a different position.
+for v in "dup:--dup-snp" "del:--deletion 3"; do
+    tag=${v%%:*}; opts=${v#*:}
+    RGD="$TMP/retro_$tag"
+    if python3 tests/make_retrogene_reads.py --fasta example/reference/22_20-21M.fa \
+            --outdir "$RGD" --with-snp $opts > /dev/null 2>&1 && \
+       ./hisat2-build -q --snp "$RGD/ref.snp" --ss "$RGD/splicesites.txt" \
+            --exon "$RGD/exons.txt" "$RGD/ref.fa" "$RGD/idx" > /dev/null 2>&1; then
+        ./hisat2 -x "$RGD/idx" -U "$RGD/reads.fq" --solo-cb-in-readname \
+            --solo-cb-whitelist "$RGD/whitelist.txt" --gene-annotation "$RGD/model.ht2gm" \
+            --solo-cell-filter None --solo-allelic --solo-out-dir "$RGD/Solo.out" \
+            -p 4 -S /dev/null > /dev/null 2>&1
+        if python3 - "$RGD" <<'PYEOF'
+import sys, os
+d = sys.argv[1]; D = os.path.join(d, "Solo.out", "Allelic", "raw")
+if not os.path.isfile(D + "/ref.mtx"): sys.exit(1)
+feats = [l.split('\t')[0] for l in open(D + "/features.tsv")]
+bcs = [l.strip() for l in open(D + "/barcodes.tsv")]
+def load(p):
+    # Summed over rows of the same name, so a duplicate row cannot hide.
+    m = {}
+    for i, l in enumerate(open(p)):
+        if i < 3: continue
+        r, c, v = l.split(); k = (feats[int(r)-1], bcs[int(c)-1])
+        m[k] = m.get(k, 0) + int(v)
+    return m
+got = {'ref': load(D + "/ref.mtx"), 'alt': load(D + "/alt.mtx")}
+n = 0
+for i, l in enumerate(open(os.path.join(d, "expected_allelic.tsv"))):
+    if i == 0: continue
+    bc, rs, allele, cnt = l.rstrip().split('\t')
+    if got[allele].get((rs, bc), 0) != int(cnt): sys.exit(2)
+    n += 1
+if n == 0: sys.exit(3)
+if feats.count("rsRETRO") != 1: sys.exit(4)
+PYEOF
+        then
+            ok "a site with two ALTDB records ($tag) is one variant, each read counted once"
+        else
+            bad "allelic counts on the $tag fixture disagree with expectation (exit $?)"
+        fi
+    else
+        bad "could not build the $tag fixture"
+    fi
+done
+
 echo "== 9. hisat2_filter_snps.py masks pseudogenes but spares real exons =="
 # A processed pseudogene lying across a real gene's exon (the DHFRP2/HLA-B case)
 # must not cost that exon its variants.

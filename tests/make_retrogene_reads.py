@@ -44,6 +44,10 @@ def main():
     ap.add_argument('--readlen', type=int, default=90)
     ap.add_argument('--with-snp', action='store_true',
                     help='add one SNP in parent exon 1 and emit REF and ALT reads')
+    ap.add_argument('--deletion', type=int, default=0, metavar='LEN',
+                    help='with --with-snp, make the variant a LEN-base deletion')
+    ap.add_argument('--dup-snp', action='store_true',
+                    help='with --with-snp, write the variant line twice')
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
 
@@ -114,13 +118,33 @@ def main():
     # perfectly to both loci -- exactly the case the allelic path used to drop,
     # because it demanded a single raw candidate rather than a single
     # top-scoring one.
+    #
+    # A deletion has a second use. The index stores every deletion twice, once
+    # more anchored at its last base for right-to-left extension, so it is the
+    # same two-records-one-site case as a duplicated .snp line without needing
+    # one. It must not slide: if the base after the deleted run repeated its
+    # first base (or the base before repeated its last), the aligner could
+    # place the gap one base over, where no variant is recorded.
+    DEL = a.deletion
     SNP_OFF = EX1 - 10
+    if DEL:
+        while seq[p_e1_s + SNP_OFF] == seq[p_e1_s + SNP_OFF + DEL] or \
+              seq[p_e1_s + SNP_OFF - 1] == seq[p_e1_s + SNP_OFF + DEL - 1]:
+            SNP_OFF += 1
+        if SNP_OFF + DEL > EX1 - 1:
+            raise SystemExit("no unambiguous deletion site in exon 1")
     snp_pos = p_e1_s + SNP_OFF
     ref_base = seq[snp_pos]
     alt_base = {'A': 'C', 'C': 'G', 'G': 'T', 'T': 'A'}[ref_base]
     if a.with_snp:
+        if DEL:
+            line = "rsRETRO\tdeletion\t%s\t%d\t%d\n" % (chrom, snp_pos, DEL)
+        else:
+            line = "rsRETRO\tsingle\t%s\t%d\t%s\n" % (chrom, snp_pos, alt_base)
         with open(os.path.join(a.outdir, 'ref.snp'), 'w') as o:
-            o.write("rsRETRO\tsingle\t%s\t%d\t%s\n" % (chrom, snp_pos, alt_base))
+            o.write(line)
+            if a.dup_snp:
+                o.write(line)
 
     # Every read straddles the junction, so each one aligns spliced to the
     # parent and contiguously to the retrogene.
@@ -132,8 +156,10 @@ def main():
         # Vary the split so the junction sits at different offsets.
         left = 20 + (k * 3) % (a.readlen - 40)
         start = EX1 - left
-        r = mrna[start:start + a.readlen]
-        if len(r) < a.readlen:
+        alt = a.with_snp and k % 2 == 1
+        # An ALT read over a deletion takes DEL extra bases so it keeps its length.
+        r = mrna[start:start + a.readlen + (DEL if alt else 0)]
+        if len(r) < a.readlen + (DEL if alt else 0):
             continue
         bc = bcs[k % len(bcs)]
         # The 6-base code is written twice, so any two UMIs differ in at least
@@ -141,9 +167,12 @@ def main():
         code = ''.join('ACGT'[(k >> (2 * j)) & 3] for j in range(6))
         umi = code + code
         allele = 'ref'
-        if a.with_snp and k % 2 == 1:
+        if alt:
             i = SNP_OFF - start          # SNP position within the read
-            r = r[:i] + alt_base + r[i + 1:]
+            if DEL:
+                r = r[:i] + r[i + DEL:]
+            else:
+                r = r[:i] + alt_base + r[i + 1:]
             allele = 'alt'
         expect[(bc, allele)] = expect.get((bc, allele), 0) + 1
         fq.write('@r%d_%s_%s\n%s\n+\n%s\n' % (k, bc, umi, r, 'I' * len(r)))
