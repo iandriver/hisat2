@@ -42,3 +42,7 @@ docs/_site
 docs/*.lock
 docs/.*-cache
 .obj/
+
+# Python bytecode, from importing evaluation/allele_bias
+__pycache__/
+*.pyc
