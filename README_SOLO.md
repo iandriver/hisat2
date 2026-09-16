@@ -312,18 +312,61 @@ any assembly you like.
 With a SNP-aware index (`hisat2-build --snp`), `--solo-allelic` writes per-cell
 reference and alternate counts keyed by rsID. Reads carrying alternate alleles
 align to the graph without penalty, which a linear reference cannot do.
-Measured on reads constructed to carry known alleles:
+
+Measured on real data: 10M reads from a 10x human PBMC 5k 3' v3 library against
+GRCh38, aligning the same reads to a linear index and to the same builder's
+graph index (15,311,803 SNPs). Allele counts come from one code path
+(MAPQ >= 10, base quality >= 13, primary alignments); heterozygous sites are
+called from the *linear* arm, so sites where the linear index found no
+alternate reads at all are excluded and the comparison understates the graph.
+An unbiased aligner sits at a reference fraction of 0.5.
+
+| | sites | mean REF fraction | bias | REF | ALT | depth |
+|---|---|---|---|---|---|---|
+| HISAT2, linear index | 1,480 | 0.5426 | +0.0426 | 67,634 | 61,393 | 129,027 |
+| HISAT2, linear + WASP | 1,363 | 0.5172 | +0.0172 | 60,135 | 60,036 | 120,171 |
+| rustar (STAR-compatible), linear | 1,472 | 0.5248 | +0.0248 | 71,304 | 70,519 | 141,823 |
+| rustar + WASP | 1,446 | 0.5108 | +0.0108 | 66,624 | 70,131 | 136,755 |
+| **HISAT2, graph index** | 1,471 | **0.5042** | **+0.0042** | 67,835 | 73,204 | 141,039 |
+
+The graph index is the least biased of the five configurations, and the only
+one that reduces bias without giving up reads. Both WASP arms correct by
+discarding reads, which costs 6.9% of depth on HISAT2 and 3.6% on rustar. The
+graph instead recovers alternate-allele reads: against HISAT2's own linear
+index, REF is flat (67,634 to 67,835) while ALT rises 19% (61,393 to 73,204).
+
+Read the baselines carefully. HISAT2's linear mode is more reference-biased
+than rustar's (+0.0426 against +0.0248) and finds 13% fewer alternate reads at
+these sites, so the graph's improvement is about 90% measured against HISAT2
+linear but about 83% against rustar linear. Depth is a wash against rustar
+(141,039 against 141,823). The claim that holds against every baseline is the
+comparison with WASP: less residual bias (+0.0042 against +0.0108) at more
+depth.
+
+The WASP rows are WASP's algorithm (swap the allele in each overlapping read,
+realign, keep only reads that return to the same locus) reimplemented over each
+aligner rather than the reference implementation, so the correction method is
+isolated from the aligner. Pass rates were 94.7% on HISAT2 and 96.7% on rustar.
+STAR itself cannot be run on this machine, which is why rustar stands in for it.
+
+Bias is roughly twice as severe inside the MHC (HISAT2 linear 0.5883), where
+the graph also recovers most of it (0.5243).
+
+The graph is charged for its own cost here. It turns 205,099 uniquely-aligned
+reads into multimappers (2.39% of linear-unique), and the MAPQ filter above
+excludes every one of them.
+
+The mechanism is easiest to see on constructed reads carrying known alleles:
 
 | | ALT reads, zero-mismatch | Total alignment score |
 |---|---|---|
 | Graph index | 120/120 | 0 |
 | Linear index | 0/120 | −720 |
 
-Under a stricter score threshold — the situation for a read carrying several
-variants, since HISAT2's default minimum for a 100 bp read admits at most
-three — the linear reference loses **every** alternate-allele read while
-retaining all reference reads. That is reference bias, and it is what this
-avoids.
+Under a stricter score threshold, which is the situation for a read carrying
+several variants since HISAT2's default minimum for a 100 bp read admits at
+most three, the linear reference loses **every** alternate-allele read while
+retaining all reference reads.
 
 ## Limitations
 
