@@ -1048,7 +1048,7 @@ static void printUsage(ostream& out) {
 	    << "  --solo-umi-start <n>      UMI offset in the barcode read (17)" << endl
 	    << "  --solo-umi-len <n>        UMI length (12)" << endl
 	    << "  --solo-cb-match <s>       Exact or 1MM (1MM)" << endl
-	    << "  --solo-emit-raw           also emit CR:Z/UR:Z (as sequenced)" << endl
+	    << "  --solo-emit-raw           also emit CR/CY/UR/UY (as sequenced)" << endl
 	    << "  --solo-out-dir <path>     write matrices here; enables counting" << endl
 	    << "  --solo-umi-dedup <s>      Exact, 1MM_CR, 1MM_All or NoDedup (1MM_CR)" << endl
 	    << "  --solo-cell-filter <s>    CellRanger2.2, TopCells, EmptyDrops_CR or" << endl

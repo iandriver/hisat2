@@ -60,7 +60,7 @@ struct SoloParams {
     int  umiStart;      // 1-based
     int  umiLen;
     bool correct1MM;    // attempt 1-mismatch whitelist correction
-    bool emitRaw;       // also emit CR:Z/UR:Z (uncorrected barcode/UMI)
+    bool emitRaw;       // also emit CR/CY/UR/UY (barcode/UMI as sequenced)
 
     SoloParams()
         : mode(SOLO_INPUT_NONE), barcodeMate(2),
@@ -80,13 +80,27 @@ struct SoloRead {
     uint8_t  status;     // SoloCBStatus
     uint8_t  cbMinQual;  // lowest base quality across the barcode
 
+    // The barcode and UMI exactly as sequenced, kept only under --solo-emit-raw
+    // so CR/UR/CY/UY can be written verbatim. Packing is 2-bit and so cannot
+    // represent an N, but a read whose barcode contains one is still aligned
+    // and still emitted, and downstream tools that do their own correction
+    // need to see it. rawLen stays 0 when the flag is off.
+    static const int kMaxCb = 16, kMaxUmi = 32;
+    char    rawCb[kMaxCb],   rawCbQual[kMaxCb];
+    char    rawUmi[kMaxUmi], rawUmiQual[kMaxUmi];
+    uint8_t rawCbLen;
+    uint8_t rawUmiLen;
+    bool    rawHasQual;  // false when the barcode came from the read name
+
     static const uint32_t kNoIdx = 0xffffffffu;
 
     void reset() {
         cbPacked = 0; cbIdx = kNoIdx; umiPacked = 0;
         cbLen = 0; umiLen = 0; status = SOLO_CB_ABSENT; cbMinQual = 0;
+        rawCbLen = 0; rawUmiLen = 0; rawHasQual = false;
     }
     bool hasBarcode() const { return cbLen > 0; }
+    bool hasRaw()     const { return rawCbLen > 0 && rawUmiLen > 0; }
     bool corrected()  const { return status == SOLO_CB_EXACT || status == SOLO_CB_1MM; }
 };
 

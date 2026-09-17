@@ -166,12 +166,42 @@ void SoloWhitelist::resolve(SoloRead& sr, bool correct1MM) const {
     else            { sr.cbIdx = SoloRead::kNoIdx; sr.status = SOLO_CB_NOMATCH; }
 }
 
+// Copies the barcode and UMI, and their qualities when the input has any, into
+// the fixed buffers on SoloRead. Lengths beyond what those buffers hold are
+// truncated rather than written past; the geometry checks at startup keep real
+// chemistries inside them.
+static void soloKeepRaw(SoloRead& sr,
+                        const char* cbSeq,  int cbLen,
+                        const char* umiSeq, int umiLen,
+                        const char* cbQual, const char* umiQual) {
+    if(cbLen  > SoloRead::kMaxCb)  cbLen  = SoloRead::kMaxCb;
+    if(umiLen > SoloRead::kMaxUmi) umiLen = SoloRead::kMaxUmi;
+    memcpy(sr.rawCb,  cbSeq,  (size_t)cbLen);
+    memcpy(sr.rawUmi, umiSeq, (size_t)umiLen);
+    sr.rawCbLen  = (uint8_t)cbLen;
+    sr.rawUmiLen = (uint8_t)umiLen;
+    sr.rawHasQual = (cbQual != NULL && umiQual != NULL);
+    if(sr.rawHasQual) {
+        memcpy(sr.rawCbQual,  cbQual,  (size_t)cbLen);
+        memcpy(sr.rawUmiQual, umiQual, (size_t)umiLen);
+    }
+}
+
 bool soloExtractFromSeq(const char* seq, const char* qual, size_t len,
                         const SoloParams& p, SoloRead& sr) {
     sr.reset();
     size_t cbEnd  = (size_t)p.cbStart  - 1 + (size_t)p.cbLen;
     size_t umiEnd = (size_t)p.umiStart - 1 + (size_t)p.umiLen;
     if(len < cbEnd || len < umiEnd) return false;
+
+    // Kept before the N check below: a barcode that cannot be packed is still
+    // the barcode that was sequenced, and --solo-emit-raw promises it verbatim.
+    if(p.emitRaw) {
+        soloKeepRaw(sr, seq + p.cbStart  - 1, p.cbLen,
+                        seq + p.umiStart - 1, p.umiLen,
+                    qual == NULL ? NULL : qual + p.cbStart  - 1,
+                    qual == NULL ? NULL : qual + p.umiStart - 1);
+    }
 
     uint64_t cb = 0, umi = 0;
     bool cbOk  = soloPack(seq + p.cbStart  - 1, p.cbLen,  cb);
@@ -218,6 +248,12 @@ bool soloExtractFromName(const char* name, size_t len,
     size_t cbLen  = last - prev - 1;
     size_t umiLen = len - last - 1;
     if(cbLen == 0 || umiLen == 0 || cbLen > 16 || umiLen > 32) return false;
+
+    if(p.emitRaw) {
+        // The name convention carries no qualities, so CY/UY are not written.
+        soloKeepRaw(sr, name + prev + 1, (int)cbLen,
+                        name + last + 1, (int)umiLen, NULL, NULL);
+    }
 
     uint64_t cb = 0, umi = 0;
     if(!soloPack(name + prev + 1, (int)cbLen, cb) ||

@@ -1025,11 +1025,28 @@ const
         soloUnpack(rd.solo.umiPacked, rd.solo.umiLen, sbuf);
         o.append("UB:Z:");
         o.append(sbuf);
-        if(soloParams_->emitRaw) {
+    }
+    // CR:Z / CY:Z / UR:Z / UY:Z -- barcode and UMI exactly as sequenced, with
+    // their base qualities. Gated separately from CB/UB because a barcode
+    // containing an N has no corrected form but is still raw evidence, and
+    // consumers that redo the correction themselves (STARsolo's own tag
+    // convention, and gravlax's ingest) require the raw tags on every record.
+    if(soloParams_ != NULL && soloParams_->emitRaw && rd.solo.hasRaw()) {
+        WRITE_SEP();
+        o.append("CR:Z:");
+        o.append(rd.solo.rawCb, rd.solo.rawCbLen);
+        if(rd.solo.rawHasQual) {
             WRITE_SEP();
-            soloUnpack(rd.solo.cbPacked, rd.solo.cbLen, sbuf);
-            o.append("CR:Z:");
-            o.append(sbuf);
+            o.append("CY:Z:");
+            o.append(rd.solo.rawCbQual, rd.solo.rawCbLen);
+        }
+        WRITE_SEP();
+        o.append("UR:Z:");
+        o.append(rd.solo.rawUmi, rd.solo.rawUmiLen);
+        if(rd.solo.rawHasQual) {
+            WRITE_SEP();
+            o.append("UY:Z:");
+            o.append(rd.solo.rawUmiQual, rd.solo.rawUmiLen);
         }
     }
     // GX:Z / GN:Z -- gene assignment, when a gene model was supplied.
@@ -1192,6 +1209,29 @@ const
         soloUnpack(rd.solo.umiPacked, rd.solo.umiLen, sbuf);
         o.append("UB:Z:");
         o.append(sbuf);
+    }
+    // CR:Z / CY:Z / UR:Z / UY:Z -- barcode and UMI exactly as sequenced, with
+    // their base qualities. Gated separately from CB/UB because a barcode
+    // containing an N has no corrected form but is still raw evidence, and
+    // consumers that redo the correction themselves (STARsolo's own tag
+    // convention, and gravlax's ingest) require the raw tags on every record.
+    if(soloParams_ != NULL && soloParams_->emitRaw && rd.solo.hasRaw()) {
+        WRITE_SEP();
+        o.append("CR:Z:");
+        o.append(rd.solo.rawCb, rd.solo.rawCbLen);
+        if(rd.solo.rawHasQual) {
+            WRITE_SEP();
+            o.append("CY:Z:");
+            o.append(rd.solo.rawCbQual, rd.solo.rawCbLen);
+        }
+        WRITE_SEP();
+        o.append("UR:Z:");
+        o.append(rd.solo.rawUmi, rd.solo.rawUmiLen);
+        if(rd.solo.rawHasQual) {
+            WRITE_SEP();
+            o.append("UY:Z:");
+            o.append(rd.solo.rawUmiQual, rd.solo.rawUmiLen);
+        }
     }
     if(print_yn_) {
         // YN:i: Minimum valid score for this mate

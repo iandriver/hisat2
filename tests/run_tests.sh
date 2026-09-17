@@ -558,6 +558,66 @@ PYEOF
     fi
 done
 
+echo "== 8b. --solo-emit-raw writes every raw barcode tag =="
+# The raw tags exist for consumers that redo barcode correction themselves, so
+# they have to survive an N: a barcode that cannot be 2-bit packed still has no
+# corrected CB, but CR/CY/UR/UY must carry what was sequenced. The flag once
+# advertised UR and never wrote it, which nothing here would have caught.
+RAW="$TMP/raw"
+mkdir -p "$RAW"
+python3 - "$RAW" <<'PYEOF'
+import sys, os
+d = sys.argv[1]
+ref = "".join(l.strip() for l in open("example/reference/22_20-21M.fa") if not l.startswith(">"))
+# A stretch with no N, far enough in to be an ordinary unique locus.
+cdna = ref[500000:500090].upper()
+assert "N" not in cdna and len(cdna) == 90
+bcs = ["ACGTACGTACGTACGT", "NCGTACGTACGTACGT"]   # second cannot be packed
+umis = ["AAACCCGGGTTT",     "AAACCCGGGTTA"]
+with open(os.path.join(d, "r1.fq"), "w") as f1, \
+     open(os.path.join(d, "r2.fq"), "w") as f2:
+    for i, (bc, umi) in enumerate(zip(bcs, umis)):
+        f1.write("@r%d\n%s%s\n+\n%s\n" % (i, bc, umi, "I" * 16 + "#" * 12))
+        f2.write("@r%d\n%s\n+\n%s\n" % (i, cdna, "I" * len(cdna)))
+open(os.path.join(d, "wl.txt"), "w").write(bcs[0] + "\n")
+PYEOF
+./hisat2 -x $IDX -1 "$RAW/r1.fq" -2 "$RAW/r2.fq" --solo-barcode-mate 1 \
+    --solo-cb-whitelist "$RAW/wl.txt" --solo-emit-raw \
+    -S "$RAW/out.sam" > /dev/null 2>&1
+if python3 - "$RAW/out.sam" <<'PYEOF'
+import sys
+recs = {}
+for line in open(sys.argv[1]):
+    if line.startswith("@"):
+        continue
+    f = line.rstrip("\n").split("\t")
+    recs[f[0]] = dict(t.split(":", 2)[::2] for t in f[11:])
+if len(recs) != 2:
+    sys.exit("expected 2 records, got %d" % len(recs))
+for name, t in recs.items():
+    for tag in ("CR", "CY", "UR", "UY"):
+        if tag not in t:
+            sys.exit("%s: missing %s" % (name, tag))
+    if len(t["CY"]) != len(t["CR"]) or len(t["UY"]) != len(t["UR"]):
+        sys.exit("%s: quality length does not match sequence length" % name)
+    if t["CY"] != "I" * 16 or t["UY"] != "#" * 12:
+        sys.exit("%s: qualities are not the ones that were sequenced" % name)
+ok, bad_ = recs["r0"], recs["r1"]
+if ok["CR"] != "ACGTACGTACGTACGT" or ok["UR"] != "AAACCCGGGTTT":
+    sys.exit("r0: raw barcode or UMI is not what was sequenced")
+if ok.get("CB") != "ACGTACGTACGTACGT" or ok.get("UB") != "AAACCCGGGTTT":
+    sys.exit("r0: corrected CB/UB missing on a whitelisted barcode")
+if bad_["CR"] != "NCGTACGTACGTACGT":
+    sys.exit("r1: the N was not carried through to CR")
+if "CB" in bad_ or "UB" in bad_:
+    sys.exit("r1: an unpackable barcode must not get a corrected form")
+PYEOF
+then
+    ok "--solo-emit-raw writes CR/CY/UR/UY, including through an N"
+else
+    bad "--solo-emit-raw did not write the raw tags as sequenced"
+fi
+
 echo "== 9. hisat2_filter_snps.py masks pseudogenes but spares real exons =="
 # A processed pseudogene lying across a real gene's exon (the DHFRP2/HLA-B case)
 # must not cost that exon its variants.
