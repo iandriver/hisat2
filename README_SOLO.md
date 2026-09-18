@@ -4,7 +4,7 @@ In-aligner single-cell quantification: barcode and UMI handling, gene
 assignment, UMI deduplication and cell × gene matrices, in one pass.
 
 The reason to use it over STARsolo is memory and variant awareness. A full
-10M-read run takes **52 s at 4.85 GB peak** against STARsolo's 28.3 GB on the
+10M-read run takes **54 s at 4.85 GB peak** against STARsolo's 28.4 GB on the
 same data, and because HISAT2 aligns to a graph index containing known SNPs,
 it can emit per-cell allele-specific counts that a linear-reference aligner
 cannot produce without bias.
@@ -225,39 +225,67 @@ can be re-measured on a memory-pressured run.
 
 ## Concordance with STARsolo (mouse)
 
-Both tools were run on the same 10M reads from a 5' GEM-X mouse PBMC sample
-against GRCm39. Reproduce with `tests/solo_concordance.py`.
+Both tools ran on the same 10M reads from a 5' GEM-X mouse PBMC sample against
+GRCm39, sharing one annotation, so gene ids line up exactly (33,696 features on
+both sides). STARsolo is 2.7.10. Reproduce with `tests/solo_concordance.py`.
+
+**The indexes are not matched, and it matters.** STAR's was built with
+`--sjdbGTFfile genes.gtf --sjdbOverhang 89`, so it knows the annotated
+junctions. HISAT2's was built from FASTA alone -- no `--ss`, no `--exon`. Every
+number below is HISAT2 giving away the annotation, and that is the largest known
+source of what is left of the residual.
 
 | Measure | Result |
 |---|---|
-| **Per-cell total UMI** | **r = 0.99993** |
-| **Called-cell overlap** | **Jaccard 0.99620** (3,673 of 3,684 / 3,676) |
-| Per-gene total UMI | r = 0.97749 |
-| Per (cell, gene), counts ≥ 10 | r = 0.94969 |
-| Valid barcodes | 0.8791 vs 0.8893 |
-| Sequencing saturation | 0.1476 vs 0.1467 |
-| Fraction of UMIs in cells | 0.8925 vs 0.8935 |
-| Total UMIs | 3,924,469 vs 4,067,946 (0.965×) |
+| **Per-cell total UMI** | **r = 0.99996** |
+| **Per-gene total UMI** | **r = 0.99191** |
+| Per (cell, gene), counts >= 10 | r = 0.98302 |
+| Called-cell overlap | Jaccard 0.97377 (3,676 shared of 3,775 / 3,676) |
+| Valid barcodes | 0.8792 vs 0.8893 |
+| Sequencing saturation | 0.1479 vs 0.1467 |
+| Fraction of UMIs in cells | 0.9014 vs 0.8934 |
+| Total UMIs | 4,010,212 vs 4,067,946 (0.986x) |
 
 Equality is not the target: the two align to different indexes with different
-scoring, so ~5% of reads that STAR maps, HISAT2 does not. What matters is that
+scoring, so some reads land differently by construction. What matters is that
 the disagreements are accounted for.
 
-**On the low whole-matrix correlation.** Pearson r over all pairs is 0.855 in
-log space, which looks poor until stratified: 2,024,446 of the 2,585,000 pairs
+**What the counter fix was worth.** Until `116101f` the counter read candidate
+0 rather than the alignment the aligner would report, which sent junction reads
+to processed retrogenes that match them ungapped at the same raw score. The same
+two matrices, before and after:
+
+| | before | after |
+|---|---|---|
+| Per-gene total UMI | r = 0.97707 | **r = 0.99191** |
+| Per (cell, gene), counts >= 10 | r = 0.94949 | **r = 0.98302** |
+| Genes within 10% of the depth ratio | 95.6% | **97.5%** |
+| Total UMIs | 3,907,774 (0.961x) | **4,010,212 (0.986x)** |
+
+**Called cells went the other way.** This table reports Jaccard 0.97377 where an
+earlier one reported 0.99620, and the fix is not the reason -- the build that
+produced the old number called 3,684 cells against this one's 3,775. The 99
+HISAT2-only barcodes carry 319-387 UMIs against a median of 777 in called cells:
+they sit on the knee, where a few more molecules tip a barcode over. Recovering
+UMIs moves barcodes across that line, so a better counter makes this number look
+slightly worse.
+
+**On the low whole-matrix correlation.** Pearson r over all pairs is 0.899 in
+log space, which looks poor until stratified: 2,022,334 of the 2,585,815 pairs
 hold a single UMI, where correlation on a near-constant value is meaningless.
-Those singletons are present in *both* matrices 94.1% of the time. Agreement
-rises monotonically with expression — r = 0.50 at 2–3 UMIs, 0.70 at 4–9, 0.95
-at ≥ 10 — which is the expected shape for sparse count data, not a defect.
+Those singletons are present in *both* matrices 94.8% of the time. Agreement
+rises monotonically with expression -- r = 0.62 at 2-3 UMIs, 0.81 at 4-9, 0.98
+at >= 10 -- which is the expected shape for sparse count data, not a defect.
 
-**On per-gene differences.** The median per-gene ratio is 1.0036 and 95.8% of
-genes with ≥ 100 UMIs fall within 10% of the overall depth ratio. The outliers
-are all paralogue pairs, and are the multimapper effect described above rather
-than misassignment.
-
-**On cell calling.** The 14 disagreeing barcodes all carry 373–396 UMIs against
-a median of 760 for called cells: they sit exactly at the knee, where a small
-difference in totals tips a barcode either way.
+**On per-gene differences.** The median per-gene ratio is 1.0000 (IQR
+0.9907-1.0107) and 97.5% of the 5,628 genes with >= 100 UMIs fall within 10% of
+the overall depth ratio. The outliers are ribosomal-protein genes and their
+processed pseudogenes on both sides -- `Rpl21` at 0.10, `Rpl37a` 0.41 and
+`Ftl1-ps1` 0.43 depleted, `Rpl10-ps3` 8.28 and `Tmsb10b` 10.4 enriched. `Rpl21`
+at a tenth of STAR's count is the annotation gap above, not a counting error:
+without `--ss`/`--exon` the index cannot prefer the spliced parent over an
+ungapped retrogene copy. Fixing that needs an annotation-aware index, not a
+change here.
 
 ## Concordance with CellRanger (human)
 
@@ -266,6 +294,11 @@ published output for 10x PBMC 1k v3 (66.6M read pairs, GRCh38, `grch38_snp`
 graph index). CellRanger uses STAR internally, so this stands in for a STARsolo
 run. Annotation was restricted to CellRanger's own gene ids so that the gene
 model is not a variable.
+
+**These numbers predate `116101f` and have not been re-measured.** On mouse that
+fix moved per-gene agreement from 0.97707 to 0.99191, so read the human table as
+a floor rather than a result. The same annotation gap applies here too: this
+index carries no `--ss`/`--exon` either.
 
 | Measure | Result |
 |---|---|
@@ -370,10 +403,12 @@ retaining all reference reads.
 
 ## Limitations
 
-- Cell calling: the knee filter has perfect precision against CellRanger's list
-  (3,684/3,684) with recall 0.955. `EmptyDrops_CR` raises recall to 0.962 but
-  drops precision to 0.991, so it is a trade rather than an improvement; it also
-  needs numpy and runs for several minutes.
+- Cell calling: on the mouse sample above, the knee filter agrees with
+  CellRanger on 3,770 barcodes -- precision 0.9987 (of 3,775 called) and recall
+  0.9772 (of CellRanger's 3,858). An earlier build measured `EmptyDrops_CR` as
+  trading precision for recall rather than improving on the knee; that has not
+  been re-measured since `116101f`, and `EmptyDrops_CR` also needs numpy and
+  runs for several minutes.
 - `--solo-allelic` and Velocyto require an unambiguous assignment and skip
   reads that do not have one.
 - Velocyto totals fall ~1% short of `GeneFull` because ambiguous-barcode reads
