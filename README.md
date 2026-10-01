@@ -1,6 +1,16 @@
-# HISAT2
+# HISAT2-Solo
+
+This fork's `solo/gene-model` branch adds single-cell and single-nucleus
+counting to HISAT2. Install this branch explicitly; the upstream repository
+does not contain these features. Start with [README_SOLO.md](README_SOLO.md)
+for counting and [INSTALL_SOLO.md](INSTALL_SOLO.md) for installation and the
+separate Rust genome-index builder.
 
 ## Contact
+
+For this fork's Solo and installation issues, use
+[iandriver/hisat2 issues](https://github.com/iandriver/hisat2/issues).
+The original HISAT2 authors are:
 
 [Daehwan Kim](https://kim-lab.org) (infphilo@gmail.com) and [Chanhee Park](https://www.linkedin.com/in/chanhee-park-97677297/) (parkchanhee@gmail.com)
 
@@ -39,14 +49,22 @@ A few notes:
    and [HISAT-genotype homepage](https://daehwankimlab.github.io/hisat-genotype/).
 
 ## Install
-    git clone https://github.com/DaehwanKimLab/hisat2.git
+    git clone --branch solo/gene-model --single-branch https://github.com/iandriver/hisat2.git
     cd hisat2
-    make
+    make -j 2
+
+Requires a C++17 compiler, GNU Make, zlib development headers, Python 3 and
+Perl. To install without administrator privileges:
+
+    make install PREFIX="$HOME/.local"
+    export PATH="$HOME/.local/bin:$PATH"
+
+See [INSTALL_SOLO.md](INSTALL_SOLO.md) for a smoke test and graph-builder setup.
 
 Usage
 ============
 ## Building an index
-`hisat2-build` builds a HISAT2 index from a set of DNA sequences. `hisat2-build` outputs a set of 6 files with
+`hisat2-build` builds a HISAT2 index from a set of DNA sequences. `hisat2-build` outputs a set of 8 files with
 suffixes `.1.ht2`, `.2.ht2`, `.3.ht2`, `.4.ht2`, `.5.ht2`, `.6.ht2`, .`7.ht2`, and `.8.ht2`.
 In the case of a large index these suffixes will have a `ht2l` termination.
 These files together constitute the index: they are all that is needed to align reads to that reference.
@@ -102,4 +120,3 @@ Publication
 * ### HISAT-3N
   Zhang, Y., Park, C., Bennett, C., Thornton, M. and Kim, D [Rapid and accurate alignment of nucleotide conversion sequencing reads with HISAT-3N](https://doi.org/10.1101/gr.275193.120) Genome Research 31(7): 1290-1295 (2021)
   
-

@@ -37,8 +37,6 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -funroll-loops")
 
-set(INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/bin" CACHE PATH "Installation directory for executables")
-
 if(MINGW OR CYGWIN)
     option(BOWTIE_MM "Memory mapped files not supported on Windows" OFF)
     option(BOWTIE_SHARED_MEM "Shared memory not supported on Windows" OFF)
@@ -111,6 +109,9 @@ set(SEARCH_CPPS
 	unique.cpp
 	hisat2_main.cpp
 	hisat2.cpp
+	gene_model.cpp
+	solo_barcode.cpp
+	solo_counter.cpp
 	)
 
 set(BUILD_CPPS
@@ -233,6 +234,16 @@ target_compile_options(hisat2-inspect-s PUBLIC "-DHISAT2_INSPECT_MAIN")
 target_compile_options(hisat2-inspect-l PUBLIC "-DHISAT2_INSPECT_MAIN")
 
 target_compile_options(hisat2-build-s PUBLIC "-DMASSIVE_DATA_RLCSA")
+target_compile_options(hisat2-build-l PUBLIC "-DMASSIVE_DATA_RLCSA")
+
+install(TARGETS ${HISAT2_BIN_LIST} RUNTIME DESTINATION bin)
+install(PROGRAMS
+    hisat2 hisat2-build hisat2-inspect
+    hisat2_extract_genes.py hisat2_solo_filter.py
+    hisat2_extract_splice_sites.py hisat2_extract_exons.py
+    hisat2_extract_snps_haplotypes_UCSC.py hisat2_extract_snps_haplotypes_VCF.py
+    hisat2_simulate_reads.py hisat2_read_statistics.py
+    DESTINATION bin)
 
 # Native gzip input. See the WITH_ZLIB block in the Makefile; without it the
 # hisat2 wrapper has to fork a `gzip -dc` per stream through a named pipe.

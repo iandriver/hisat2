@@ -34,6 +34,13 @@
 
 namespace {
 
+// system() invokes a shell: quote paths as data, including embedded apostrophes.
+std::string shellQuote(const std::string& value) {
+    std::string quoted = "'";
+    for(char c : value) quoted += (c == '\'') ? "'\\''" : std::string(1, c);
+    return quoted + "'";
+}
+
 bool byCbUmiGene(const SoloRec& a, const SoloRec& b) {
     if(a.cb != b.cb)   return a.cb < b.cb;
     if(a.umi != b.umi) return a.umi < b.umi;
@@ -762,10 +769,11 @@ bool SoloCounter::finalizeFeature(size_t fi, std::string& err) {
         if(filter_ == SOLO_FILTER_EMPTYDROPS) {
             const char* featName = (feature() == GENE_FEATURE_BODY) ? "GeneFull" : "Gene";
             std::string raw = outDir_ + "/" + featName + "/raw";
-            std::string script = "hisat2_solo_filter.py";
-            std::string cmd = "python3 " + script + " --raw '" + raw +
-                              "' --expect-cells " + std::to_string(expectedCells_);
-            if(system((cmd + " 2>/dev/null >/dev/null").c_str()) != 0) {
+            const char* helper = std::getenv("HISAT2_SOLO_FILTER");
+            std::string script = helper ? helper : "hisat2_solo_filter.py";
+            std::string cmd = "python3 " + shellQuote(script) + " --raw " + shellQuote(raw) +
+                              " --expect-cells " + std::to_string(expectedCells_);
+            if(system(cmd.c_str()) != 0) {
                 fprintf(stderr,
                         "Note: could not run EmptyDrops_CR automatically. The knee-filtered "
                         "matrix has been written; to refine it run:\n  %s\n", cmd.c_str());

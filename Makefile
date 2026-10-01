@@ -536,19 +536,20 @@ DESTDIR ?=
 # INSTALL_DIR and never used it. Installs the binaries plus the wrapper
 # scripts and the helper scripts the wrappers invoke at runtime.
 INSTALL_SCRIPTS = hisat2 hisat2-build hisat2-inspect \
+	hisat2_extract_genes.py hisat2_solo_filter.py \
 	hisat2_extract_splice_sites.py hisat2_extract_exons.py \
 	hisat2_extract_snps_haplotypes_UCSC.py hisat2_extract_snps_haplotypes_VCF.py \
 	hisat2_simulate_reads.py hisat2_read_statistics.py
 
 .PHONY: install uninstall
 install: all
-	install -d $(DESTDIR)$(BINDIR)
-	install -m 755 $(HISAT2_BIN_LIST) $(DESTDIR)$(BINDIR)
-	install -m 755 $(INSTALL_SCRIPTS) $(DESTDIR)$(BINDIR)
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 755 $(HISAT2_BIN_LIST) "$(DESTDIR)$(BINDIR)"
+	install -m 755 $(INSTALL_SCRIPTS) "$(DESTDIR)$(BINDIR)"
 
 uninstall:
 	for f in $(HISAT2_BIN_LIST) $(INSTALL_SCRIPTS); do \
-		rm -f $(DESTDIR)$(BINDIR)/$$(basename $$f); \
+		rm -f "$(DESTDIR)$(BINDIR)/$$(basename $$f)"; \
 	done
 
 clean:

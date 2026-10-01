@@ -46,3 +46,7 @@ docs/.*-cache
 # Python bytecode, from importing evaluation/allele_bias
 __pycache__/
 *.pyc
+
+# Local CMake builds and generated example FASTA indexes.
+/build/
+/example/reference/*.fa.fai

@@ -1,13 +1,17 @@
 # HISAT2 single-cell (Solo)
 
+Use the `solo/gene-model` branch of `iandriver/hisat2`; see
+[INSTALL_SOLO.md](INSTALL_SOLO.md) for dependencies, installation, a smoke test
+and the separate Rust graph-index builder.
+
 In-aligner single-cell quantification: barcode and UMI handling, gene
 assignment, UMI deduplication and cell × gene matrices, in one pass.
 
 The reason to use it over STARsolo is memory and variant awareness. A full
 10M-read run takes **54 s at 4.85 GB peak** against STARsolo's 28.4 GB on the
 same data, and because HISAT2 aligns to a graph index containing known SNPs,
-it can emit per-cell allele-specific counts that a linear-reference aligner
-cannot produce without bias.
+it can emit per-cell allele-specific counts with less reference bias in the
+tested libraries.
 
 ## Quick start
 
@@ -25,7 +29,15 @@ hisat2 -x genome_index \
 ```
 
 The gene model is a sidecar, not part of the index, so annotation can be
-updated without the ~200 GB graph-index rebuild.
+updated without rebuilding the graph index.
+
+The FASTA, index and GTF must use the same assembly and chromosome names.
+The commands assume `make install` and PATH setup from the installation guide;
+from an uninstalled checkout, use `python3 ./hisat2_extract_genes.py` and `./hisat2`.
+Create `genome.fa.fai` with `samtools faidx genome.fa`. Use a whitelist matched
+to the library chemistry; the example uses 16-base barcodes and 12-base UMIs
+for 10x 3' v3. Set these lengths explicitly for other chemistries. The mate
+order above is intentional: cDNA R2 first, barcode R1 second.
 
 ### Counting both features in one pass
 
@@ -53,7 +65,7 @@ Order does not otherwise matter: the matrices are identical either way.
 | `--solo-cb-start` / `--solo-cb-len` | `1` / `16` | Barcode offset and length within the barcode read |
 | `--solo-umi-start` / `--solo-umi-len` | `17` / `12` | UMI offset and length |
 | `--solo-cb-match <s>` | `1MM` | `Exact` or `1MM` |
-| `--solo-emit-raw` | off | Also emit `CR:Z` (barcode as sequenced, before correction) |
+| `--solo-emit-raw` | off | Also emit `CR`/`CY` and `UR`/`UY` (raw barcode/UMI sequences and qualities) |
 | `--solo-out-dir <d>` | — | Write matrices here; enables counting |
 | `--solo-umi-dedup <s>` | `1MM_CR` | `Exact`, `1MM_CR`, `1MM_All`, `NoDedup` |
 | `--solo-cell-filter <s>` | `CellRanger2.2` | `CellRanger2.2`, `TopCells`, `EmptyDrops_CR`, `None` |
@@ -335,10 +347,10 @@ sample where ribosomal-protein genes matter.
 | index on disk | **6.5 GB** | 29 GB |
 | peak RSS while mapping | **9.0–9.4 GB** | 31.3 GB |
 
-Note the direction of the trade: HISAT2's index is 4.5× smaller and needs ~3.4×
-less RAM, but a human *graph* index cannot practically be built — use the
-prebuilt one. STAR's is larger and slower to build, and you can rebuild it for
-any assembly you like.
+For these indexes, HISAT2's index is 4.5× smaller and needs ~3.4× less RAM while
+mapping. Construction is a separate cost: the companion Rust builder has
+reproduced a whole-human-genome graph index using disk-backed construction.
+See [INSTALL_SOLO.md](INSTALL_SOLO.md) for its RAM and scratch-space requirements.
 
 ## Variant-aware single-cell
 

@@ -34,6 +34,12 @@ use Getopt::Long qw(GetOptions);
 use File::Spec;
 use POSIX;
 
+sub shellQuote {
+    my ($value) = @_;
+    $value =~ s/'/'\\''/g;
+    return "'$value'";
+}
+
 
 my ($vol,$script_path,$prog);
 $prog = File::Spec->rel2abs( __FILE__ );
@@ -53,6 +59,9 @@ my $align_prog_s= File::Spec->catpath($vol,$script_path,$align_bin_s);
 my $align_prog_l= File::Spec->catpath($vol,$script_path,$align_bin_l);
 my $align_prog  = $align_prog_s;
 my $read_stat_prog = File::Spec->catpath($vol,$script_path,"hisat2_read_statistics.py");
+# Pass the helper's absolute path to the aligner. Its working directory belongs
+# to the user, and need not contain any of our installed scripts.
+$ENV{HISAT2_SOLO_FILTER} //= File::Spec->catpath($vol,$script_path,"hisat2_solo_filter.py");
 my $idx_ext_l     = 'ht2l';
 my $idx_ext_s     = 'ht2'; 
 my $idx_ext       = $idx_ext_s; 
@@ -81,7 +90,7 @@ my @signame     = ();
 # args from wrapper args
 sub getHt2Desc($) {
 	my $d = shift;
-	my $cmd = "'$align_prog' --wrapper basic-0 --arg-desc";
+	my $cmd = shellQuote($align_prog)." --wrapper basic-0 --arg-desc";
 	open(my $fh, "$cmd |") || Fail("Failed to run command '$cmd'\n");
 	while(readline $fh) {
 		chomp;
@@ -296,7 +305,7 @@ if ((scalar(@read_files) > 0)
 		&& ($skip_read_stat == 0)
     && ($read_files[0] ne '-')) {
 	Info("Check read length: $read_files[0]\n");
-	my $cmd = "'$read_stat_prog' $read_files[0]";
+	my $cmd = shellQuote($read_stat_prog)." ".shellQuote($read_files[0]);
 	my $read_len_str = "";
 
 	open(my $fh, "$cmd |") || Fail("Failed to run command '$cmd'\n");
@@ -403,10 +412,10 @@ sub Extract_IndexName_From {
     for (my $i=0; $i<@_; $i++) {
         if ($_[$i] eq $index_opt){
 			my $idx_basename = $_[$i+1];
-			my @idx_filenames = glob($idx_basename . "*.ht2{,l}");
+			my @idx_filenames = grep { -f $_ } map { "$idx_basename.1.$_" } ("ht2", "ht2l");
 			unless(@idx_filenames) {
 				if(exists $ENV{"HISAT2_INDEXES"}) {
-					@idx_filenames = glob("$ENV{'HISAT2_INDEXES'}/$idx_basename" . "ht2{,l}");
+					@idx_filenames = grep { -f $_ } map { "$ENV{'HISAT2_INDEXES'}/$idx_basename.1.$_" } ("ht2", "ht2l");
 				}
 
 				if(!@idx_filenames) {
@@ -436,7 +445,7 @@ if(wrapInput(\@unps, \@mate1s, \@mate2s)) {
 		# Make a named pipe for delivering mate #1s
 		my $m1fn = "$temp_dir/$$.inpipe1";
 		push @to_delete, $m1fn;
-		push @ht2_args, "-1 $m1fn";
+		push @ht2_args, ("-1", $m1fn);
 		# Create named pipe 1 for writing
 		if(!$no_pipes) {
 			mkfifo($m1fn, 0700) || Fail("mkfifo($m1fn) failed.\n");
@@ -454,7 +463,7 @@ if(wrapInput(\@unps, \@mate1s, \@mate2s)) {
 		# Make a named pipe for delivering mate #2s
 		my $m2fn = "$temp_dir/$$.inpipe2";
 		push @to_delete, $m2fn;
-		push @ht2_args, "-2 $m2fn";
+		push @ht2_args, ("-2", $m2fn);
 		# Create named pipe 2 for writing
 		if(!$no_pipes) {
 			mkfifo($m2fn, 0700) || Fail("mkfifo($m2fn) failed.\n");
@@ -477,7 +486,7 @@ if(wrapInput(\@unps, \@mate1s, \@mate2s)) {
 		# Make a named pipe for delivering unpaired reads
 		my $ufn = "$temp_dir/$$.unp";
 		push @to_delete, $ufn;
-		push @ht2_args, "-U $ufn";
+		push @ht2_args, ("-U", $ufn);
 		# Create named pipe 2 for writing
 		if(!$no_pipes) {
 			mkfifo($ufn, 0700) || Fail("mkfifo($ufn) failed.\n");
@@ -549,7 +558,7 @@ else {
 my $debug_str = ($debug ? "-debug" : "");
 
 # Construct command invoking hisat2-align
-my $cmd = "'$align_prog$debug_str' --wrapper basic-0 ".join(" ", @ht2_args);
+my $cmd = shellQuote("$align_prog$debug_str")." --wrapper basic-0 ".join(" ", map { shellQuote($_) } @ht2_args);
 
 # Possibly add read input on an anonymous pipe
 $cmd = "$readpipe $cmd" if defined($readpipe);
