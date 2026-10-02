@@ -1,0 +1,39 @@
+name: Solo Ubuntu x86-64
+
+on:
+  push:
+    branches: [solo/gene-model]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [make, cmake]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native x86-64 and install dependencies
+        run: |
+          test "$(uname -m)" = x86_64
+          cat /etc/os-release
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake zlib1g-dev python3 python3-numpy perl samtools
+      - name: Make build, regression suite and installation
+        if: matrix.build == 'make'
+        run: |
+          make -j2
+          bash tests/run_tests.sh
+          bash tests/install_smoke.sh
+      - name: CMake build and installation
+        if: matrix.build == 'cmake'
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/solo"
+          cmake --build build -j2
+          cmake --install build
+          bash tests/install_smoke.sh "$RUNNER_TEMP/solo/bin"
