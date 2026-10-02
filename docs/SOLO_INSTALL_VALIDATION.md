@@ -31,3 +31,22 @@ was repeated for this installation change.
 
 Linux and Windows were not tested in this pass. The documented setup targets
 Linux and macOS; the measurements above confirm this macOS ARM64 installation.
+
+## Ubuntu x86-64 validation, 2026-10-02
+
+Native Ubuntu 24.04 x86-64 GitHub-hosted runners tested commit `6df30ea`.
+Both Make and CMake built and installed successfully. The Make regression
+suite reported **47 passed, 0 failed**; both installations passed the installed
+wrappers, Solo matrices, helper lookup and fallback smoke tests.
+
+The first run exposed a missing `<stddef.h>` include in the standalone UMI
+header under GCC. Adding that explicit dependency fixed the failure; the
+successful rerun is linked below. The workflow now runs on pushes to
+`solo/gene-model`, with read-only repository permissions.
+
+[Successful Ubuntu run](https://github.com/iandriver/hisat2/actions/runs/37024820815)
+
+These are correctness and installation checks, not runtime benchmarks. They
+exercise HISAT2's small C++ index construction and Solo counting; the separate
+Rust builder and whole-human-genome construction were not repeated here.
+Windows remains untested in these passes.
