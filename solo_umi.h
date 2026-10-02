@@ -21,6 +21,7 @@
 #define SOLO_UMI_H_
 
 #include <stdint.h>
+#include <stddef.h>
 #include <vector>
 
 /** UMI collapsing rule. Names match STARsolo so results are comparable. */

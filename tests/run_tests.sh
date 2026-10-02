@@ -408,11 +408,12 @@ fi
 
 # Clone sizes are bookkeeping over deduplication and must change none of its
 # decisions; the unit test checks that against the pre-histogram rule.
-if $CXX -std=c++11 -O2 -iquote . -o "$TMP/unit_solo_umi" tests/unit_solo_umi.cpp > /dev/null 2>&1 \
-   && "$TMP/unit_solo_umi" > /dev/null 2>&1; then
+if $CXX -std=c++11 -O2 -iquote . -o "$TMP/unit_solo_umi" tests/unit_solo_umi.cpp > "$TMP/unit_solo_umi.log" 2>&1 \
+   && "$TMP/unit_solo_umi" >> "$TMP/unit_solo_umi.log" 2>&1; then
     ok "UMI collapsing unit test: clone sizes, read conservation, no drift"
 else
     bad "UMI collapsing unit test failed"
+    cat "$TMP/unit_solo_umi.log"
 fi
 
 # A processed retrogene is a copy of the mature mRNA, so a read spanning the
